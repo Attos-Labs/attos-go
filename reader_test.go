@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/attos/sdk/internal/hash"
+	"github.com/Attos-Labs/attos-go/internal/hash"
 )
 
 func createMockAttosFile(t testing.TB) string {

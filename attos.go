@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"os"
 
-	binInternal "github.com/attos/sdk/internal/binary"
-	"github.com/attos/sdk/internal/mmap"
+	binInternal "github.com/Attos-Labs/attos-go/internal/binary"
+	"github.com/Attos-Labs/attos-go/internal/mmap"
 )
 
 // File format constants

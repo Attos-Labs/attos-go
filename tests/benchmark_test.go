@@ -4,7 +4,7 @@ import (
 	"os"
 	"testing"
 
-	"github.com/attos/sdk"
+	"github.com/Attos-Labs/attos-go"
 )
 
 func BenchmarkClientGet(b *testing.B) {

@@ -5,7 +5,7 @@ import (
 	"log"
 	"os"
 
-	"github.com/attos/sdk"
+	"github.com/Attos-Labs/attos-go"
 )
 
 func main() {

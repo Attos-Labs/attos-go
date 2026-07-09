@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/attos/sdk"
+	"github.com/Attos-Labs/attos-go"
 )
 
 func TestE2ESyncAndGet(t *testing.T) {

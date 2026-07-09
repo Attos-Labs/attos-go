@@ -7,8 +7,8 @@ import (
 	"runtime"
 	"unsafe"
 
-	"github.com/attos/sdk/internal/binary"
-	"github.com/attos/sdk/internal/hash"
+	"github.com/Attos-Labs/attos-go/internal/binary"
+	"github.com/Attos-Labs/attos-go/internal/hash"
 )
 
 // ─────────────────────────────────────────────────────────────
