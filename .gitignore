@@ -1,0 +1,5 @@
+*.prof
+sdk.test
+examples/sync/sync
+.attos/
+*.csv
