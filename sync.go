@@ -1,14 +1,21 @@
 package attos
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
 	"sync/atomic"
 	"time"
 )
+
+type Config struct {
+	TelemetryEnabled bool `json:"telemetry_enabled"`
+}
 
 const defaultBaseURL = "http://localhost:8080"
 
@@ -20,6 +27,8 @@ type Synchronizer struct {
 	datasetID    string
 	blobPath     string
 	syncInterval time.Duration
+	nodeID       string
+	config       atomic.Pointer[Config]
 	db           atomic.Pointer[Map]
 	ticker       *time.Ticker
 	done         chan struct{}
@@ -31,8 +40,10 @@ func NewSynchronizer(datasetID string, opts ...Option) (*Synchronizer, error) {
 		datasetID: datasetID,
 		baseURL:   defaultBaseURL,
 		cacheDir:  "./.attos/cache",
+		nodeID:    fmt.Sprintf("node-%d", time.Now().UnixNano()), // Unique ID for this node
 		done:      make(chan struct{}),
 	}
+	s.config.Store(&Config{TelemetryEnabled: false}) // Privacy by Default
 	for _, opt := range opts {
 		opt(s)
 	}
@@ -53,16 +64,53 @@ func (s *Synchronizer) poll() {
 	for {
 		select {
 		case <-s.ticker.C:
-			_ = s.Sync() // Errors can be logged or emitted via telemetry
+			start := time.Now()
+			err := s.Sync()
+			latency := time.Since(start)
+			s.reportTelemetry(err, latency)
 		case <-s.done:
 			return
 		}
 	}
 }
 
+func (s *Synchronizer) reportTelemetry(syncErr error, latency time.Duration) {
+	cfg := s.config.Load()
+	if cfg == nil || !cfg.TelemetryEnabled {
+		return // Privacy by Default: do nothing if telemetry is disabled
+	}
+
+	status := "sync_success"
+	if syncErr != nil {
+		status = "sync_failure"
+	}
+
+	payload := map[string]any{
+		"dataset_id": s.datasetID,
+		"node_id":    s.nodeID,
+		"status":     status,
+		"latency_ms": int32(latency.Milliseconds()),
+	}
+
+	body, _ := json.Marshal(payload)
+	url := fmt.Sprintf("%s/api/v1/telemetry/report", s.baseURL)
+	req, _ := http.NewRequest(http.MethodPost, url, bytes.NewReader(body))
+	req.Header.Set("Active-Org-ID", "internal-sdk") // In a real SDK, we'd pass the actual org ID or derive it from the API key
+	
+	// Fire and forget
+	go func() {
+		resp, err := http.DefaultClient.Do(req)
+		if err == nil {
+			resp.Body.Close()
+		} else {
+			log.Printf("[Attos SDK] Telemetry dispatch failed: %v", err)
+		}
+	}()
+}
+
 // Sync downloads the compiled blob and saves it to local disk, then memory-maps it.
 func (s *Synchronizer) Sync() error {
-	url := fmt.Sprintf("%s/api/v1/sync/%s", s.baseURL, s.datasetID)
+	url := fmt.Sprintf("%s/api/v1/datasets/sync/%s", s.baseURL, s.datasetID)
 
 	req, err := http.NewRequest(http.MethodGet, url, nil)
 	if err != nil {
@@ -79,6 +127,14 @@ func (s *Synchronizer) Sync() error {
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
 		return fmt.Errorf("sync failed (%d): %s", resp.StatusCode, string(body))
+	}
+
+	// Read config header for telemetry state
+	if configHeader := resp.Header.Get("X-Attos-Config"); configHeader != "" {
+		var cfg Config
+		if err := json.Unmarshal([]byte(configHeader), &cfg); err == nil {
+			s.config.Store(&cfg)
+		}
 	}
 
 	if err := os.MkdirAll(s.cacheDir, 0o755); err != nil {

@@ -13,35 +13,38 @@ func createMockAttosFile(t testing.TB) string {
 	t.Helper()
 
 	keyStr := "user_123"
-	keyHash := hash.String(keyStr)
-	sig := uint32(keyHash >> 32)
-	idx := hash.Block(keyHash, 0, 0) % 64
+	keyHash := xxhash.Sum64String(keyStr)
+	low := uint32(keyHash)
+
+	totalKeys := uint64(1)
+	numBuckets := uint64(1)
 
 	buf := make([]byte, 1024)
-	copy(buf[0:4], "MPHB")
-	binary.BigEndian.PutUint32(buf[4:8], 0) // flags
-	binary.BigEndian.PutUint64(buf[24:32], 64) // nkeys = 64
-	binary.BigEndian.PutUint64(buf[32:40], 64) // offtbl = 64
+	copy(buf[0:4], "ATTO")
+	binary.BigEndian.PutUint32(buf[4:8], 1) // version
+	buf[8] = 0x01 // 16-bit displacement
+	binary.BigEndian.PutUint64(buf[9:17], totalKeys)
+	binary.BigEndian.PutUint64(buf[17:25], numBuckets)
+	binary.BigEndian.PutUint64(buf[25:33], 0) // global seed
 
-	// We fill 65 entries (64 keys + 1 dummy)
-	dummyEntry := (uint64(sig) << 32) | uint64(1009) // Also give dummy sig to fail expectedly if something goes wrong
-	for i := 0; i < 65; i++ {
-		binary.LittleEndian.PutUint64(buf[64+i*8:72+i*8], dummyEntry)
-	}
+	// Routing Table at 33
+	d := uint16(0)
+	binary.BigEndian.PutUint16(buf[33:35], d)
 
-	// Place our real entry at idx
-	valOffset := uint32(1000)
-	entry1 := (uint64(sig) << 32) | uint64(valOffset)
-	binary.LittleEndian.PutUint64(buf[64+int(idx)*8:72+int(idx)*8], entry1)
+	finalIndex := (uint64(low) ^ uint64(d)) % totalKeys
 
-	// Map Index at 584
-	buf[584] = 1
-	binary.LittleEndian.PutUint32(buf[588:592], 1)
-	binary.LittleEndian.PutUint64(buf[600:608], 1)
-	binary.LittleEndian.PutUint64(buf[608:616], ^uint64(0))
+	// Values array at 35
+	payloadStr := "value_123"
+	payloadOffset := uint32(0)
+	payloadLen := uint32(len(payloadStr))
+	
+	packed := (uint64(payloadOffset) << 32) | uint64(payloadLen)
+	valueOff := 35 + int(finalIndex*8)
+	binary.BigEndian.PutUint64(buf[valueOff:valueOff+8], packed)
 
-	// Value at 1000
-	copy(buf[1000:1009], "value_123")
+	// Blob at 35 + 8 = 43
+	blobOff := 35 + int(totalKeys*8)
+	copy(buf[blobOff:blobOff+int(payloadLen)], payloadStr)
 
 	dir := t.TempDir()
 	path := filepath.Join(dir, "mock.nh")
