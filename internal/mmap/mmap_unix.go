@@ -40,3 +40,19 @@ func Unmap(data []byte) error {
 	}
 	return syscall.Munmap(data)
 }
+
+// Mlock locks the mapped memory into RAM, preventing it from being swapped out.
+func Mlock(data []byte) error {
+	if data == nil {
+		return nil
+	}
+	return syscall.Mlock(data)
+}
+
+// Munlock unlocks the mapped memory.
+func Munlock(data []byte) error {
+	if data == nil {
+		return nil
+	}
+	return syscall.Munlock(data)
+}

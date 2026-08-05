@@ -96,7 +96,7 @@ func (s *Synchronizer) reportTelemetry(syncErr error, latency time.Duration) {
 	url := fmt.Sprintf("%s/api/v1/telemetry/report", s.baseURL)
 	req, _ := http.NewRequest(http.MethodPost, url, bytes.NewReader(body))
 	req.Header.Set("Active-Org-ID", "internal-sdk") // In a real SDK, we'd pass the actual org ID or derive it from the API key
-	
+
 	// Fire and forget
 	go func() {
 		resp, err := http.DefaultClient.Do(req)
