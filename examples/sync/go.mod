@@ -1,7 +1,9 @@
-module github.com/attos/sdk/examples/sync
+module sync-example
 
-go 1.22
+go 1.24.3
 
-require github.com/attos/sdk v0.0.0
+require github.com/Attos-Labs/attos-go v0.0.0
 
-replace github.com/attos/sdk => ../..
+require github.com/cespare/xxhash/v2 v2.3.0 // indirect
+
+replace github.com/Attos-Labs/attos-go => ../../

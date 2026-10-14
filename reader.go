@@ -211,13 +211,3 @@ func (m *Map) Reload(path string) error {
 	return nil
 }
 
-func warmUp(data []byte) {
-	const pageSize = 4096
-	var dummy byte
-	for i := 0; i < len(data); i += pageSize {
-		dummy += data[i]
-	}
-	if len(data) > 0 {
-		dummy += data[len(data)-1]
-	}
-}

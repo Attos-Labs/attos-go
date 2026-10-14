@@ -394,7 +394,7 @@ func (b *Builder) Compile(outPath string) error {
 		numKeys++
 	}
 
-	numBuckets := numKeys / 2
+	numBuckets := uint64(float64(numKeys) * 1.2)
 	if numBuckets == 0 {
 		numBuckets = 1
 	}

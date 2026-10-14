@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"os"
@@ -19,15 +20,21 @@ func main() {
 		log.Fatal("set NH_DATASET_ID environment variable")
 	}
 
-	client := attos.NewClient(apiKey)
+	ctx := context.Background()
+	client, err := attos.NewSynchronizer(ctx, datasetID, attos.WithAPIKey(apiKey))
+	if err != nil {
+		log.Fatalf("failed to initialize synchronizer: %v", err)
+	}
+	defer client.Close()
 
 	fmt.Println("Syncing dataset…")
-	if err := client.Sync(datasetID); err != nil {
+	// Sync is called internally by NewSynchronizer, but we can call it again if we want.
+	if err := client.Sync(ctx); err != nil {
 		log.Fatalf("sync failed: %v", err)
 	}
-	fmt.Printf("Blob saved to: %s\n", client.BlobPath())
+	fmt.Printf("Blob saved.\n")
 
-	val, err := client.Get("example-key")
+	val, err := client.Get([]byte("example-key"))
 	if err != nil {
 		log.Fatalf("lookup failed: %v", err)
 	}

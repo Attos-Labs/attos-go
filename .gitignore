@@ -3,3 +3,10 @@
 examples/sync/sync
 .attos/
 *.csv
+
+# Added standard Go ignores
+bin/
+vendor/
+.idea/
+.vscode/
+*.out
