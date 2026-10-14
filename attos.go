@@ -203,6 +203,7 @@ func parseHeader(data []byte, checkCRC bool) (*mapping, error) {
 		r:       int(R),
 		d:       int(D),
 		end:     int(sz - 4),
+		size:    int64(sz),
 	}, nil
 }
 

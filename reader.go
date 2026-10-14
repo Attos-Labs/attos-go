@@ -72,8 +72,11 @@ type mapping struct {
 	end     int    // len(data) - 4 (start of CRC trailer)
 	pinned  bool
 
-	retired atomic.Bool
-	readers [readerStripes]stripe
+	size    int64 // len(data); immutable, readable without pinning
+
+	retired    atomic.Bool
+	readers    [readerStripes]stripe
+	nonLookups atomic.Uint64 // pinned operations that are not lookups (Len, Scan)
 
 	rowsOnce sync.Once
 	rows     int
@@ -104,7 +107,7 @@ func (mp *mapping) lookups() uint64 {
 	for i := range mp.readers {
 		n += mp.readers[i].exit.Load()
 	}
-	return n
+	return n - mp.nonLookups.Load()
 }
 
 // waitDrained spins (with backoff) until no reader is inside mp.
@@ -305,6 +308,7 @@ func (m *Map) Scan(fn func(key, value []byte) bool) {
 	if mp == nil {
 		return
 	}
+	mp.nonLookups.Add(1)
 	defer s.exit.Add(1)
 	be := binary.BigEndian
 	for off := mp.r; off < mp.d; off += 8 {
@@ -335,18 +339,17 @@ func (m *Map) Len() int {
 	if mp == nil {
 		return 0
 	}
+	mp.nonLookups.Add(1)
 	defer s.exit.Add(1)
 	return mp.countRows()
 }
 
 // Size returns the size in bytes of the currently mapped blob (0 if closed).
 func (m *Map) Size() int64 {
-	mp, s, _ := m.enter(0)
-	if mp == nil {
-		return 0
+	if mp := m.cur.Load(); mp != nil {
+		return mp.size
 	}
-	defer s.exit.Add(1)
-	return int64(len(mp.data))
+	return 0
 }
 
 // Lookups returns the total number of lookups served by this Map so far.
