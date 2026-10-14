@@ -239,23 +239,26 @@ func (m *Map) Get(key []byte) ([]byte, error) {
 	if mp == nil {
 		return nil, m.noMapErr()
 	}
-	v, err := m.entrySampled(mp, h, key, n)
+	if n&sampleMask == 0 {
+		v, err := m.entryTimed(mp, h, key)
+		s.exit.Add(1)
+		return v, err
+	}
+	v, err := mp.entry(h, key)
 	s.exit.Add(1)
 	return v, err
 }
 
-// entrySampled resolves key and, for 1 in 256 lookups (per stripe, chosen by
-// the enter counter value n), records the lookup latency for telemetry. Every
-// lookup accessor (Get, GetString, GetCopy, View) goes through it so the
-// telemetry percentiles reflect whichever accessor the application uses.
-func (m *Map) entrySampled(mp *mapping, h uint64, key []byte, n uint64) ([]byte, error) {
-	if n&sampleMask == 0 {
-		t0 := time.Now()
-		v, err := mp.entry(h, key)
-		m.lat.record(time.Since(t0))
-		return v, err
-	}
-	return mp.entry(h, key)
+// entryTimed resolves key and records its latency for telemetry. Every lookup
+// accessor (Get, GetString, GetCopy, View) calls it for 1 in 256 lookups (per
+// stripe, chosen by the enter counter value), so the telemetry percentiles
+// reflect whichever accessor the application uses. The unsampled fast path
+// calls mp.entry directly in each accessor.
+func (m *Map) entryTimed(mp *mapping, h uint64, key []byte) ([]byte, error) {
+	t0 := time.Now()
+	v, err := mp.entry(h, key)
+	m.lat.record(time.Since(t0))
+	return v, err
 }
 
 // GetString performs an O(1) lookup returning a zero-copy string with the same
@@ -281,7 +284,13 @@ func (m *Map) GetCopy(key, dst []byte) ([]byte, error) {
 	if mp == nil {
 		return dst, m.noMapErr()
 	}
-	v, err := m.entrySampled(mp, h, key, n)
+	var v []byte
+	var err error
+	if n&sampleMask == 0 {
+		v, err = m.entryTimed(mp, h, key)
+	} else {
+		v, err = mp.entry(h, key)
+	}
 	if err == nil {
 		dst = append(dst, v...)
 	}
@@ -299,7 +308,13 @@ func (m *Map) View(key []byte, fn func(value []byte)) error {
 		return m.noMapErr()
 	}
 	defer s.exit.Add(1)
-	v, err := m.entrySampled(mp, h, key, n)
+	var v []byte
+	var err error
+	if n&sampleMask == 0 {
+		v, err = m.entryTimed(mp, h, key)
+	} else {
+		v, err = mp.entry(h, key)
+	}
 	if err != nil {
 		return err
 	}
