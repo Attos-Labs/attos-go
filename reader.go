@@ -2,212 +2,458 @@ package attos
 
 import (
 	"encoding/binary"
+	"sync"
 	"sync/atomic"
+	"time"
 	"unsafe"
 
+	"github.com/Attos-Labs/attos-go/internal/mmap"
 	"github.com/cespare/xxhash/v2"
 )
 
-type Map struct {
-	data []byte // full file mmap'd read-only
+// ---------------------------------------------------------------------------
+// Hot-swap and retirement scheme (CONTRACTS.md §4)
+//
+// A Map is a handle to one immutable *mapping (an mmap'd, validated blob)
+// published through an atomic.Pointer. Reload / the Synchronizer replace it
+// with a single atomic store; readers never observe a partially valid map.
+//
+// Reclamation uses per-mapping striped reader counters (a Dekker-style
+// handshake, i.e. a hazard counter rather than an epoch):
+//
+//	reader:  mp := cur.Load(); stripe.enter.Add(1); if mp.retired.Load() { back off, retry }
+//	         ... read mp.data ...; stripe.exit.Add(1)
+//	writer:  old := cur.Swap(new); old.retired.Store(true)
+//	         wait until Σ exit == Σ enter over all stripes; sleep RetireGrace; munmap
+//
+// Go's sync/atomic operations are sequentially consistent, so either the
+// reader's load of `retired` observes true (it backs off without touching the
+// mapped bytes and retries on the new pointer) or the writer's read of the
+// stripe counters observes the reader's enter (it waits). A lookup in progress
+// therefore always completes against the mapping it loaded, and no mapping is
+// unmapped while a lookup can still touch it (no use-after-unmap).
+//
+// Stripes are chosen from the key hash so concurrent readers rarely share a
+// cache line; the hot path is two uncontended atomic adds and two atomic
+// loads — no locks, no allocation, no syscalls. The monotonic exit counters
+// double as the lookup counter used by telemetry.
+//
+// Bounds: at most maxRetired (2) mappings are pending retirement at once;
+// a third swap blocks until one is released, so retired maps cannot grow
+// without bound. File descriptors are closed right after mmap, so retirement
+// never leaks fds.
+//
+// Zero-copy validity window: a slice/string returned by Get/GetString aliases
+// the mapping. It stays valid while that mapping is current, and for at least
+// OpenConfig.RetireGrace (default 2 s) after it is replaced. After Close it is
+// invalid. Use GetCopy (copies into a caller buffer, 0 allocs with capacity)
+// or View (callback runs while the mapping is pinned) for anything longer.
+// ---------------------------------------------------------------------------
 
-	// Header metadata
-	version    uint32
-	is32Bit    bool
-	totalKeys  uint64
-	numBuckets uint64
-	globalSeed uint64
+const (
+	readerStripes = 32
+	stripeMask    = readerStripes - 1
+	maxRetired    = 2
+)
 
-	// Offsets
-	routingOffset int
-	valuesOffset  int
-	blobOffset    int
-
-	closed atomic.Bool
-	pinned bool
+type stripe struct {
+	enter atomic.Uint64
+	exit  atomic.Uint64
+	_     [48]byte // pad to a 64-byte cache line
 }
 
-func (m *Map) find(keyHash uint64) (uint64, uint32, bool) {
-	if m.numBuckets == 0 || m.totalKeys == 0 {
-		return 0, 0, false
+// mapping is one immutable, validated, mmap'd blob.
+type mapping struct {
+	data    []byte
+	is32    bool
+	slots   uint64 // S
+	buckets uint64 // B
+	r, d    int    // routing-table end / data-block start offsets
+	end     int    // len(data) - 4 (start of CRC trailer)
+	pinned  bool
+
+	size int64 // len(data); immutable, readable without pinning
+
+	retired    atomic.Bool
+	readers    [readerStripes]stripe
+	nonLookups atomic.Uint64 // pinned operations that are not lookups (Len, Scan)
+
+	rowsOnce sync.Once
+	rows     int
+}
+
+func (mp *mapping) unmap() error {
+	if mp.pinned {
+		_ = mmap.Munlock(mp.data)
 	}
-	high := uint32(keyHash >> 32)
-	low := uint32(keyHash)
+	err := mmap.Unmap(mp.data)
+	mp.data = nil
+	return err
+}
 
-	segmentIdx := uint64(high) % m.numBuckets
+func (mp *mapping) inFlight() bool {
+	var en, ex uint64
+	for i := range mp.readers {
+		ex += mp.readers[i].exit.Load()
+	}
+	for i := range mp.readers {
+		en += mp.readers[i].enter.Load()
+	}
+	return en != ex
+}
 
-	var d uint32
-	if m.is32Bit {
-		dispOff := m.routingOffset + int(segmentIdx*4)
-		d = binary.BigEndian.Uint32(m.data[dispOff:])
+func (mp *mapping) lookups() uint64 {
+	var n uint64
+	for i := range mp.readers {
+		n += mp.readers[i].exit.Load()
+	}
+	return n - mp.nonLookups.Load()
+}
+
+// waitDrained spins (with backoff) until no reader is inside mp.
+func (mp *mapping) waitDrained() {
+	for d := time.Microsecond; mp.inFlight(); {
+		time.Sleep(d)
+		if d < 10*time.Millisecond {
+			d *= 2
+		}
+	}
+}
+
+// entry resolves key (with precomputed hash h) to its value. CONTRACTS §1.6.
+func (mp *mapping) entry(h uint64, key []byte) ([]byte, error) {
+	data := mp.data
+	be := binary.BigEndian
+	bk := uint64(uint32(h>>32)) % mp.buckets
+	var d uint64
+	if mp.is32 {
+		d = uint64(be.Uint32(data[uint64(headerSize)+bk*4:]))
 	} else {
-		dispOff := m.routingOffset + int(segmentIdx*2)
-		d = uint32(binary.BigEndian.Uint16(m.data[dispOff:]))
+		d = uint64(be.Uint16(data[uint64(headerSize)+bk*2:]))
 	}
-
-	finalIndex := (uint64(low) ^ uint64(d)) % m.totalKeys
-
-	valueOff := m.valuesOffset + int(finalIndex*8)
-	packed := binary.BigEndian.Uint64(m.data[valueOff:])
-
-	offset := uint32(packed >> 32)
-	length := uint32(packed)
-
-	return uint64(offset), length, true
-}
-
-// GetString performs an O(1) lookup returning a string.
-// Zero-allocation: memory is mmap'd read-only, safe to alias.
-func (m *Map) GetString(key string) (string, error) {
-	if m.closed.Load() {
-		return "", ErrMapClosed
-	}
-
-	keyHash := xxhash.Sum64String(key)
-
-	offset, length, ok := m.find(keyHash)
-	if !ok || length == 0 {
-		return "", ErrKeyNotFound
-	}
-
-	start := m.blobOffset + int(offset)
-	end := start + int(length)
-
-	if end > len(m.data) || start > end {
-		return "", ErrCorruptedBinary
-	}
-
-	val := m.data[start:end]
-	if len(val) == 0 {
-		return "", nil
-	}
-	// Verify actual key match to handle false positives
-	if len(val) < 2 {
-		return "", ErrCorruptedBinary
-	}
-	keyLen := int(binary.BigEndian.Uint16(val[:2]))
-	if len(val) < 2+keyLen {
-		return "", ErrCorruptedBinary
-	}
-	keyBytes := val[2 : 2+keyLen]
-	if string(keyBytes) != key {
-		return "", ErrKeyNotFound
-	}
-
-	payload := val[2+keyLen:]
-	return unsafe.String(unsafe.SliceData(payload), len(payload)), nil
-}
-
-// Get performs an O(1) lookup returning a byte slice.
-func (m *Map) Get(key []byte) ([]byte, error) {
-	if m.closed.Load() {
-		return nil, ErrMapClosed
-	}
-
-	keyHash := xxhash.Sum64(key)
-
-	offset, length, ok := m.find(keyHash)
-	if !ok || length == 0 {
+	slot := (uint64(uint32(h)) ^ d) % mp.slots
+	word := be.Uint64(data[uint64(mp.r)+slot*8:])
+	ln := word & 0xFFFFFFFF
+	if ln == 0 {
 		return nil, ErrKeyNotFound
 	}
-
-	start := m.blobOffset + int(offset)
-	end := start + int(length)
-
-	if end > len(m.data) || start > end {
+	start := uint64(mp.d) + word>>32
+	stop := start + ln
+	if ln < 2 || stop > uint64(mp.end) {
 		return nil, ErrCorruptedBinary
 	}
-
-	val := m.data[start:end]
-	// Verify actual key match
-	if len(val) < 2 {
+	e := data[start:stop]
+	kl := uint64(be.Uint16(e))
+	if 2+kl > ln {
 		return nil, ErrCorruptedBinary
 	}
-	keyLen := int(binary.BigEndian.Uint16(val[:2]))
-	if len(val) < 2+keyLen {
-		return nil, ErrCorruptedBinary
-	}
-	keyBytes := val[2 : 2+keyLen]
-
-	// Check equality
-	if len(keyBytes) != len(key) {
+	if string(e[2:2+kl]) != string(key) { // compiles to memequal, no allocation
 		return nil, ErrKeyNotFound
 	}
-	for i := range keyBytes {
-		if keyBytes[i] != key[i] {
-			return nil, ErrKeyNotFound
-		}
-	}
-
-	return val[2+keyLen:], nil
+	return e[2+kl:], nil
 }
 
-// Scan iterates sequentially over all entries in the blob.
-// Note that order is arbitrary (dictated by the MPHF construction).
-func (m *Map) Scan(fn func(key, value []byte) bool) {
-	if m.closed.Load() || m.totalKeys == 0 {
-		return
-	}
-
-	for i := uint64(0); i < m.totalKeys; i++ {
-		valueOff := m.valuesOffset + int(i*8)
-		packed := binary.BigEndian.Uint64(m.data[valueOff:])
-
-		offset := uint32(packed >> 32)
-		length := uint32(packed)
-		if length == 0 {
-			continue
-		}
-
-		start := m.blobOffset + int(offset)
-		end := start + int(length)
-
-		if end <= len(m.data) && start <= end {
-			val := m.data[start:end]
-			if len(val) >= 2 {
-				keyLen := int(binary.BigEndian.Uint16(val[:2]))
-				if len(val) >= 2+keyLen {
-					keyBytes := val[2 : 2+keyLen]
-					valueBytes := val[2+keyLen:]
-					if !fn(keyBytes, valueBytes) {
-						break
-					}
-				}
+func (mp *mapping) countRows() int {
+	mp.rowsOnce.Do(func() {
+		be := binary.BigEndian
+		n := 0
+		for off := mp.r; off < mp.d; off += 8 {
+			if be.Uint64(mp.data[off:])&0xFFFFFFFF != 0 {
+				n++
 			}
 		}
+		mp.rows = n
+	})
+	return mp.rows
+}
+
+// Map is a read-only, memory-mapped Attos blob that can be hot-swapped.
+// All methods are safe for concurrent use. Lookups are lock-free and
+// allocation-free.
+type Map struct {
+	cur    atomic.Pointer[mapping]
+	closed atomic.Bool
+	cfg    OpenConfig
+
+	retireMu   sync.Mutex
+	retireCond *sync.Cond
+	pending    int           // mappings swapped out but not yet unmapped
+	shutdown   chan struct{} // closed by Close to cut retire grace short
+	retireWG   sync.WaitGroup
+
+	retiredLookups atomic.Uint64 // lookups served by already-unmapped mappings
+	swaps          atomic.Uint64
+	closeOnce      sync.Once
+	closeErr       error
+
+	lat latencyHistogram
+}
+
+// newEmptyMap returns a handle with no mapping yet (used by Synchronizer).
+func newEmptyMap(cfg OpenConfig) *Map {
+	return &Map{cfg: cfg}
+}
+
+func (m *Map) init() {
+	m.retireMu.Lock()
+	if m.retireCond == nil {
+		m.retireCond = sync.NewCond(&m.retireMu)
+		m.shutdown = make(chan struct{})
+	}
+	m.retireMu.Unlock()
+}
+
+// enter pins the current mapping for a read. It returns nil if the Map is
+// closed (or has no mapping yet). The caller must call exit(mp, s).
+func (m *Map) enter(h uint64) (*mapping, *stripe, uint64) {
+	for {
+		mp := m.cur.Load()
+		if mp == nil {
+			return nil, nil, 0
+		}
+		s := &mp.readers[h&stripeMask]
+		n := s.enter.Add(1)
+		if !mp.retired.Load() {
+			return mp, s, n
+		}
+		s.enter.Add(^uint64(0)) // back off; mp is being retired
 	}
 }
 
-// Reload opens a new file, validates it, and replaces the current map's data.
-// NOTE: For thread-safety, callers should use Synchronizer or atomic.Pointer externally.
-func (m *Map) Reload(path string) error {
-	newMap, err := OpenWithConfig(path, OpenConfig{
-		PinToMemory: m.pinned,
-		// Maintain whatever state is appropriate; for SDK simplicity we just use default
-	})
+func (m *Map) noMapErr() error {
+	if m.closed.Load() {
+		return ErrMapClosed
+	}
+	return ErrNoMap
+}
+
+// sampleMask selects 1 in 256 lookups (per stripe) for latency sampling.
+const sampleMask = 255
+
+// Get performs an O(1) lookup and returns a zero-copy slice of the value.
+// See the package comment above for the validity window; use GetCopy or View
+// to keep the value longer. Zero allocations.
+func (m *Map) Get(key []byte) ([]byte, error) {
+	h := xxhash.Sum64(key)
+	mp, s, n := m.enter(h)
+	if mp == nil {
+		return nil, m.noMapErr()
+	}
+	if n&sampleMask == 0 {
+		t0 := time.Now()
+		v, err := mp.entry(h, key)
+		m.lat.record(time.Since(t0))
+		s.exit.Add(1)
+		return v, err
+	}
+	v, err := mp.entry(h, key)
+	s.exit.Add(1)
+	return v, err
+}
+
+// GetString performs an O(1) lookup returning a zero-copy string with the same
+// validity window as Get. Zero allocations.
+func (m *Map) GetString(key string) (string, error) {
+	kb := unsafe.Slice(unsafe.StringData(key), len(key))
+	v, err := m.Get(kb)
+	if err != nil {
+		return "", err
+	}
+	if len(v) == 0 {
+		return "", nil
+	}
+	return unsafe.String(unsafe.SliceData(v), len(v)), nil
+}
+
+// GetCopy looks up key and appends its value to dst, returning the extended
+// slice. The result never aliases the mapping and stays valid across swaps and
+// Close. Zero allocations when cap(dst) is large enough.
+func (m *Map) GetCopy(key, dst []byte) ([]byte, error) {
+	h := xxhash.Sum64(key)
+	mp, s, _ := m.enter(h)
+	if mp == nil {
+		return dst, m.noMapErr()
+	}
+	v, err := mp.entry(h, key)
+	if err == nil {
+		dst = append(dst, v...)
+	}
+	s.exit.Add(1)
+	return dst, err
+}
+
+// View looks up key and calls fn with a zero-copy value. The mapping is pinned
+// for the duration of fn, so the slice is valid until fn returns (fn must not
+// retain it, call Close or block on a swap).
+func (m *Map) View(key []byte, fn func(value []byte)) error {
+	h := xxhash.Sum64(key)
+	mp, s, _ := m.enter(h)
+	if mp == nil {
+		return m.noMapErr()
+	}
+	defer s.exit.Add(1)
+	v, err := mp.entry(h, key)
 	if err != nil {
 		return err
 	}
-
-	// Swap contents
-	oldData := m.data
-	m.data = newMap.data
-	m.version = newMap.version
-	m.is32Bit = newMap.is32Bit
-	m.totalKeys = newMap.totalKeys
-	m.numBuckets = newMap.numBuckets
-	m.globalSeed = newMap.globalSeed
-	m.routingOffset = newMap.routingOffset
-	m.valuesOffset = newMap.valuesOffset
-	m.blobOffset = newMap.blobOffset
-
-	// Now we need to manually close the old data, since m now holds the new data
-	oldMap := &Map{
-		data:   oldData,
-		pinned: m.pinned,
-	}
-	_ = oldMap.Close() // unmaps and munlocks old data
-
+	fn(v)
 	return nil
 }
 
+// Scan iterates over all entries in slot order (arbitrary, MPHF-defined).
+// The mapping is pinned for the whole scan; key and value slices are valid
+// only during the callback. Return false to stop early.
+func (m *Map) Scan(fn func(key, value []byte) bool) {
+	mp, s, _ := m.enter(0)
+	if mp == nil {
+		return
+	}
+	mp.nonLookups.Add(1)
+	defer s.exit.Add(1)
+	be := binary.BigEndian
+	for off := mp.r; off < mp.d; off += 8 {
+		word := be.Uint64(mp.data[off:])
+		ln := word & 0xFFFFFFFF
+		if ln == 0 {
+			continue
+		}
+		start := uint64(mp.d) + word>>32
+		stop := start + ln
+		if ln < 2 || stop > uint64(mp.end) {
+			continue
+		}
+		e := mp.data[start:stop]
+		kl := uint64(be.Uint16(e))
+		if 2+kl > ln {
+			continue
+		}
+		if !fn(e[2:2+kl], e[2+kl:]) {
+			return
+		}
+	}
+}
+
+// Len returns the number of keys in the current mapping (0 if closed).
+func (m *Map) Len() int {
+	mp, s, _ := m.enter(0)
+	if mp == nil {
+		return 0
+	}
+	mp.nonLookups.Add(1)
+	defer s.exit.Add(1)
+	return mp.countRows()
+}
+
+// Size returns the size in bytes of the currently mapped blob (0 if closed).
+func (m *Map) Size() int64 {
+	if mp := m.cur.Load(); mp != nil {
+		return mp.size
+	}
+	return 0
+}
+
+// Lookups returns the total number of lookups served by this Map so far.
+func (m *Map) Lookups() uint64 {
+	n := m.retiredLookups.Load()
+	if mp := m.cur.Load(); mp != nil {
+		n += mp.lookups()
+	}
+	return n
+}
+
+// Swaps returns how many times the mapping has been replaced.
+func (m *Map) Swaps() uint64 { return m.swaps.Load() }
+
+// Reload opens and validates path (honouring the Map's OpenConfig) and
+// atomically hot-swaps it in. In-flight lookups finish on the old mapping,
+// which is unmapped after they drain plus RetireGrace. Reload blocks while
+// two retired mappings are still pending. On error the current map is kept.
+func (m *Map) Reload(path string) error {
+	mp, err := openMapping(path, m.cfg, m.cfg.ValidateChecksum)
+	if err != nil {
+		return err
+	}
+	if err := m.publish(mp); err != nil {
+		mp.unmap()
+		return err
+	}
+	return nil
+}
+
+// publish atomically installs mp and schedules retirement of the previous one.
+func (m *Map) publish(mp *mapping) error {
+	m.init()
+	m.retireMu.Lock()
+	for m.pending >= maxRetired && !m.closed.Load() {
+		m.retireCond.Wait()
+	}
+	if m.closed.Load() {
+		m.retireMu.Unlock()
+		return ErrMapClosed
+	}
+	old := m.cur.Swap(mp)
+	if old != nil {
+		m.pending++
+		m.swaps.Add(1)
+	}
+	m.retireMu.Unlock()
+	if old != nil {
+		old.retired.Store(true)
+		m.retireWG.Add(1)
+		go m.retire(old, m.cfg.retireGrace())
+	}
+	return nil
+}
+
+func (m *Map) retire(old *mapping, grace time.Duration) {
+	defer m.retireWG.Done()
+	old.waitDrained()
+	if grace > 0 {
+		t := time.NewTimer(grace)
+		select {
+		case <-t.C:
+		case <-m.shutdown:
+			t.Stop()
+		}
+	}
+	m.retiredLookups.Add(old.lookups())
+	if err := old.unmap(); err != nil {
+		m.cfg.logger().Printf("[attos] Warning: munmap of retired map failed: %v", err)
+	}
+	m.retireMu.Lock()
+	m.pending--
+	m.retireCond.Broadcast()
+	m.retireMu.Unlock()
+}
+
+// PendingRetired returns the number of replaced mappings not yet unmapped.
+func (m *Map) PendingRetired() int {
+	m.init()
+	m.retireMu.Lock()
+	defer m.retireMu.Unlock()
+	return m.pending
+}
+
+// Close stops all further lookups (they return ErrMapClosed), waits for
+// in-flight lookups to finish and unmaps every mapping, including retired
+// ones still in their grace period. Zero-copy values become invalid when
+// Close returns. Close is idempotent.
+func (m *Map) Close() error {
+	m.closeOnce.Do(func() {
+		m.init()
+		m.retireMu.Lock()
+		m.closed.Store(true)
+		close(m.shutdown)
+		old := m.cur.Swap(nil)
+		m.retireCond.Broadcast()
+		m.retireMu.Unlock()
+		if old != nil {
+			old.retired.Store(true)
+			old.waitDrained()
+			m.retiredLookups.Add(old.lookups())
+			m.closeErr = old.unmap()
+		}
+		m.retireWG.Wait()
+	})
+	return m.closeErr
+}

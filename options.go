@@ -2,6 +2,7 @@ package attos
 
 import (
 	"log"
+	"net/http"
 	"time"
 )
 
@@ -14,20 +15,21 @@ func WithBaseURL(url string) Option {
 	return func(s *Synchronizer) { s.baseURL = url }
 }
 
-// WithCacheDir sets the directory used to persist downloaded .nh blobs.
-// Default: "./.attos/cache".
+// WithCacheDir sets the directory holding the live blob (<datasetID>.attos),
+// its ETag and in-progress downloads (always in the same directory, so the
+// final rename is atomic). Default: "./.attos/cache".
 func WithCacheDir(dir string) Option {
 	return func(s *Synchronizer) { s.cacheDir = dir }
 }
 
-// WithAPIKey sets the bearer token sent in X-API-Key on every sync request.
+// WithAPIKey sets the API key sent in X-API-Key on sync and telemetry requests.
 func WithAPIKey(key string) Option {
 	return func(s *Synchronizer) { s.apiKey = key }
 }
 
-// WithSyncInterval sets the polling interval for background cloud sync.
+// WithSyncInterval sets the background polling interval.
 // A value of 0 disables background polling (manual Sync calls only).
-// Default: 0 (disabled).
+// Default: DefaultSyncInterval (30 s), identical across the Go, Rust and Java SDKs.
 func WithSyncInterval(d time.Duration) Option {
 	return func(s *Synchronizer) { s.syncInterval = d }
 }
@@ -42,4 +44,37 @@ func WithLogger(l *log.Logger) Option {
 // WithOpenConfig sets the OpenConfig for the Synchronizer.
 func WithOpenConfig(cfg OpenConfig) Option {
 	return func(s *Synchronizer) { s.openConfig = cfg }
+}
+
+// WithNodeID overrides the X-Attos-Node-ID (1–128 chars). Default: a UUIDv4
+// generated once per Synchronizer.
+func WithNodeID(id string) Option {
+	return func(s *Synchronizer) { s.nodeID = id }
+}
+
+// WithHTTPClient sets the HTTP client used for sync and telemetry.
+func WithHTTPClient(c *http.Client) Option {
+	return func(s *Synchronizer) { s.httpClient = c }
+}
+
+// WithTelemetryInterval sets the telemetry report interval (default 60 s).
+// 0 disables the telemetry emitter.
+func WithTelemetryInterval(d time.Duration) Option {
+	return func(s *Synchronizer) { s.telemetryInterval = d }
+}
+
+// WithTelemetryBaseURL sends telemetry to a different base URL than sync.
+func WithTelemetryBaseURL(url string) Option {
+	return func(s *Synchronizer) { s.telemetryBaseURL = url }
+}
+
+// WithTelemetryAPIKey uses a different API key for telemetry than for sync.
+func WithTelemetryAPIKey(key string) Option {
+	return func(s *Synchronizer) { s.telemetryAPIKey = key }
+}
+
+// WithTelemetryDisabled turns the telemetry emitter off regardless of the
+// server's X-Attos-Config.
+func WithTelemetryDisabled() Option {
+	return func(s *Synchronizer) { s.telemetryOff = true }
 }
