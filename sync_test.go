@@ -555,7 +555,11 @@ func TestTelemetryRetryDropAndPause(t *testing.T) {
 	}
 	// 4xx: no retry.
 	calls.Store(0)
-	f.telemFn = func(w http.ResponseWriter, r *http.Request, body []byte) bool { calls.Add(1); w.WriteHeader(400); return true }
+	f.telemFn = func(w http.ResponseWriter, r *http.Request, body []byte) bool {
+		calls.Add(1)
+		w.WriteHeader(400)
+		return true
+	}
 	s.FlushTelemetry()
 	waitFor(t, func() bool { return s.TelemetryStats().DroppedPending == 2 })
 	if calls.Load() != 1 {

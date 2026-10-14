@@ -72,7 +72,7 @@ type mapping struct {
 	end     int    // len(data) - 4 (start of CRC trailer)
 	pinned  bool
 
-	size    int64 // len(data); immutable, readable without pinning
+	size int64 // len(data); immutable, readable without pinning
 
 	retired    atomic.Bool
 	readers    [readerStripes]stripe
