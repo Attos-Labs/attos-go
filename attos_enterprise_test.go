@@ -290,3 +290,41 @@ func TestScanIterator(t *testing.T) {
 		t.Errorf("expected some keys, got 0")
 	}
 }
+
+func BenchmarkLookupGetCopy(b *testing.B) {
+	path := generateTestAttos(b, 10000, true)
+	m, err := attos.OpenWithConfig(path, attos.OpenConfig{ValidateChecksum: true})
+	if err != nil {
+		b.Fatal(err)
+	}
+	defer m.Close()
+	key := []byte("key-0042")
+	dst := make([]byte, 0, 64)
+	b.ResetTimer()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		if dst, err = m.GetCopy(key, dst[:0]); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+func BenchmarkLookupView(b *testing.B) {
+	path := generateTestAttos(b, 10000, true)
+	m, err := attos.OpenWithConfig(path, attos.OpenConfig{ValidateChecksum: true})
+	if err != nil {
+		b.Fatal(err)
+	}
+	defer m.Close()
+	key := []byte("key-0042")
+	var sink int
+	fn := func(v []byte) { sink += len(v) }
+	b.ResetTimer()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		if err := m.View(key, fn); err != nil {
+			b.Fatal(err)
+		}
+	}
+	_ = sink
+}

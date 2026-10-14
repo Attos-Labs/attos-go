@@ -240,14 +240,24 @@ func (m *Map) Get(key []byte) ([]byte, error) {
 		return nil, m.noMapErr()
 	}
 	if n&sampleMask == 0 {
-		t0 := time.Now()
-		v, err := mp.entry(h, key)
-		m.lat.record(time.Since(t0))
+		v, err := m.entryTimed(mp, h, key)
 		s.exit.Add(1)
 		return v, err
 	}
 	v, err := mp.entry(h, key)
 	s.exit.Add(1)
+	return v, err
+}
+
+// entryTimed resolves key and records its latency for telemetry. Every lookup
+// accessor (Get, GetString, GetCopy, View) calls it for 1 in 256 lookups (per
+// stripe, chosen by the enter counter value), so the telemetry percentiles
+// reflect whichever accessor the application uses. The unsampled fast path
+// calls mp.entry directly in each accessor.
+func (m *Map) entryTimed(mp *mapping, h uint64, key []byte) ([]byte, error) {
+	t0 := time.Now()
+	v, err := mp.entry(h, key)
+	m.lat.record(time.Since(t0))
 	return v, err
 }
 
@@ -270,11 +280,17 @@ func (m *Map) GetString(key string) (string, error) {
 // Close. Zero allocations when cap(dst) is large enough.
 func (m *Map) GetCopy(key, dst []byte) ([]byte, error) {
 	h := xxhash.Sum64(key)
-	mp, s, _ := m.enter(h)
+	mp, s, n := m.enter(h)
 	if mp == nil {
 		return dst, m.noMapErr()
 	}
-	v, err := mp.entry(h, key)
+	var v []byte
+	var err error
+	if n&sampleMask == 0 {
+		v, err = m.entryTimed(mp, h, key)
+	} else {
+		v, err = mp.entry(h, key)
+	}
 	if err == nil {
 		dst = append(dst, v...)
 	}
@@ -287,12 +303,18 @@ func (m *Map) GetCopy(key, dst []byte) ([]byte, error) {
 // retain it, call Close or block on a swap).
 func (m *Map) View(key []byte, fn func(value []byte)) error {
 	h := xxhash.Sum64(key)
-	mp, s, _ := m.enter(h)
+	mp, s, n := m.enter(h)
 	if mp == nil {
 		return m.noMapErr()
 	}
 	defer s.exit.Add(1)
-	v, err := mp.entry(h, key)
+	var v []byte
+	var err error
+	if n&sampleMask == 0 {
+		v, err = m.entryTimed(mp, h, key)
+	} else {
+		v, err = mp.entry(h, key)
+	}
 	if err != nil {
 		return err
 	}
