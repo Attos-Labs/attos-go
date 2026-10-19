@@ -1,6 +1,7 @@
 package attos
 
 import (
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"errors"
@@ -75,6 +76,7 @@ type Synchronizer struct {
 	datasetID    string
 	syncInterval time.Duration
 	nodeID       string
+	noGzip       bool // WithCompression(false): ask for the raw blob
 	logger       *log.Logger
 	httpClient   *http.Client
 	openConfig   OpenConfig
@@ -350,6 +352,14 @@ func (s *Synchronizer) syncHTTP(ctx context.Context) error {
 	req.Header.Set("X-API-Key", s.apiKey)
 	req.Header.Set("X-Attos-Node-ID", s.nodeID)
 	req.Header.Set("User-Agent", "attos-go/"+Version)
+	// Set explicitly either way, so net/http neither adds gzip nor
+	// decompresses transparently: the encoding is handled (and validated)
+	// below.
+	if s.noGzip {
+		req.Header.Set("Accept-Encoding", "identity")
+	} else {
+		req.Header.Set("Accept-Encoding", "gzip")
+	}
 	if s.etag != "" && s.m.cur.Load() != nil {
 		req.Header.Set("If-None-Match", s.etag)
 	}
@@ -371,7 +381,28 @@ func (s *Synchronizer) syncHTTP(ctx context.Context) error {
 		return se
 	}
 
-	if err := s.installFrom(resp.Body, resp.ContentLength); err != nil {
+	body, contentLength := io.Reader(resp.Body), resp.ContentLength
+	switch enc := resp.Header.Get("Content-Encoding"); enc {
+	case "", "identity":
+	case "gzip":
+		// Compressed sync (CONTRACTS §4): the blob is decompressed while it
+		// is written. Content-Length counts compressed bytes; a truncated or
+		// corrupted stream fails the gzip trailer check (ErrUnexpectedEOF or
+		// a checksum error), and the decompressed blob still goes through the
+		// full v1 validation (CRC32) before the swap.
+		zr, err := gzip.NewReader(resp.Body)
+		if err != nil {
+			if errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, io.EOF) {
+				return fmt.Errorf("%w: %v", ErrTruncatedDownload, err)
+			}
+			return fmt.Errorf("download blob: %w", err)
+		}
+		defer zr.Close()
+		body, contentLength = zr, -1
+	default:
+		return fmt.Errorf("download blob: unsupported Content-Encoding %q", enc)
+	}
+	if err := s.installFrom(body, contentLength); err != nil {
 		return err
 	}
 	s.etag = resp.Header.Get("ETag")

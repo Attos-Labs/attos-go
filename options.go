@@ -56,6 +56,13 @@ func WithNodeID(id string) Option {
 	return func(s *Synchronizer) { s.nodeID = id }
 }
 
+// WithCompression controls whether syncs ask for the gzip copy of the blob
+// (Accept-Encoding: gzip; default true). Compression is transport-only: the
+// stored and memory-mapped blob is always the v1 file.
+func WithCompression(on bool) Option {
+	return func(s *Synchronizer) { s.noGzip = !on }
+}
+
 // WithHTTPClient sets the HTTP client used for sync and telemetry.
 func WithHTTPClient(c *http.Client) Option {
 	return func(s *Synchronizer) { s.httpClient = c }
