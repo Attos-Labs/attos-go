@@ -9,4 +9,4 @@ bin/
 vendor/
 .idea/
 .vscode/
-*.out
+*.outexamples/sync/main
