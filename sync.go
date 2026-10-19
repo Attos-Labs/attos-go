@@ -23,7 +23,7 @@ import (
 )
 
 // Version is the attos-go SDK version reported in User-Agent and telemetry.
-const Version = "1.1.0"
+const Version = "1.2.0"
 
 // Sync protocol constants (CONTRACTS.md §4). The default poll interval is the
 // same in the Go, Rust and Java SDKs.
