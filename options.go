@@ -46,8 +46,12 @@ func WithOpenConfig(cfg OpenConfig) Option {
 	return func(s *Synchronizer) { s.openConfig = cfg }
 }
 
-// WithNodeID overrides the X-Attos-Node-ID (1–128 chars). Default: a UUIDv4
-// generated once per Synchronizer.
+// WithNodeID overrides the X-Attos-Node-ID (1–128 chars). Default: the
+// ATTOS_NODE_ID environment variable, else the hostname, else a random UUIDv4.
+//
+// Active nodes are counted (and billed) by distinct node ID, so every process
+// on one host counts as one node by default; containers sharing a hostname are
+// one node too. Set a distinct ID per process if they should count separately.
 func WithNodeID(id string) Option {
 	return func(s *Synchronizer) { s.nodeID = id }
 }

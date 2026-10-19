@@ -19,7 +19,6 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
-	"github.com/google/uuid"
 )
 
 // Version is the attos-go SDK version reported in User-Agent and telemetry.
@@ -133,7 +132,7 @@ func NewSynchronizer(ctx context.Context, datasetID string, opts ...Option) (*Sy
 		datasetID:         datasetID,
 		baseURL:           defaultBaseURL,
 		cacheDir:          "./.attos/cache",
-		nodeID:            uuid.New().String(),
+		nodeID:            defaultNodeID(),
 		syncInterval:      DefaultSyncInterval,
 		httpClient:        &http.Client{Timeout: 10 * time.Minute},
 		telemetryInterval: DefaultTelemetryInterval,
