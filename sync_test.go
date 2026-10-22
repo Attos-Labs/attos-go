@@ -248,7 +248,7 @@ func TestSyncFaultInjection(t *testing.T) {
 
 	next := buildBlob(t, "B", 200)
 	badVersion := append([]byte(nil), next...)
-	badVersion[7] = 2
+	badVersion[7] = 3
 	cases := []struct {
 		name string
 		h    func(http.ResponseWriter, *http.Request)

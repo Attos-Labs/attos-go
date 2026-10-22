@@ -905,7 +905,9 @@ func (b *Builder) write(p *placement, dst io.Writer) (BuildStats, error) {
 // Compile writes the blob to outPath atomically: it writes a temporary file in
 // the same directory, fsyncs it and renames it over outPath. On error outPath
 // is untouched and the temporary file is removed.
-func (b *Builder) Compile(outPath string) error {
+// CompileV1 writes the legacy hash-and-displace format (version 1). Kept for compatibility and tests;
+// new datasets should use Compile.
+func (b *Builder) CompileV1(outPath string) error {
 	_, err := b.CompileFile(context.Background(), outPath)
 	return err
 }

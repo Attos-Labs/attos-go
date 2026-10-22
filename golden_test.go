@@ -179,8 +179,8 @@ func TestGoldenBuilder(t *testing.T) {
 				t.Fatalf("BuildFromFile: %v", err)
 			}
 			outPath := filepath.Join(t.TempDir(), "out.attos")
-			if err := b.Compile(outPath); err != nil {
-				t.Fatalf("Compile(file): %v", err)
+			if err := b.CompileV1(outPath); err != nil {
+				t.Fatalf("CompileV1(file): %v", err)
 			}
 			if _, got := readFileSHA(t, outPath); got != f.blobSHA {
 				t.Fatalf("file blob sha %s != manifest %s", got, f.blobSHA)
@@ -331,6 +331,11 @@ func TestGoldenReader(t *testing.T) {
 				t.Fatalf("fixture sha mismatch")
 			}
 			class := strings.FieldsFunc(f.want, func(r rune) bool { return r == ' ' || r == '(' })[0]
+			if f.name == "bad_version.attos" {
+				// The fixture is a v1 body under version 2. Version 2 is a real format now, so the reader
+				// rejects it as a malformed v2 file instead of an unknown version.
+				class = "Corrupted"
+			}
 			_, err := attos.OpenWithConfig(path, attos.OpenConfig{ValidateChecksum: true})
 			if !errors.Is(err, want[class]) {
 				t.Fatalf("%s: got %v, want %s", f.name, err, class)

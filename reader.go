@@ -8,6 +8,7 @@ import (
 	"unsafe"
 
 	"github.com/Attos-Labs/attos-go/internal/mmap"
+	"github.com/Attos-Labs/attos-go/internal/pthash"
 	"github.com/cespare/xxhash/v2"
 )
 
@@ -72,6 +73,14 @@ type mapping struct {
 	end     int    // len(data) - 4 (start of CRC trailer)
 	pinned  bool
 
+	// Version 2 (PTHash) state: slot table, uint32 offset table (n+1 entries), blob.
+	version    uint32
+	table      *pthash.Table
+	offsetsOff int
+	compressed bool  // flags bit 0: records live in LZ4/stored blocks
+	blockShift uint8 // log2(records per block) when compressed
+	totalKeys  uint64
+
 	size int64 // len(data); immutable, readable without pinning
 
 	retired    atomic.Bool
@@ -122,6 +131,9 @@ func (mp *mapping) waitDrained() {
 
 // entry resolves key (with precomputed hash h) to its value. CONTRACTS §1.6.
 func (mp *mapping) entry(h uint64, key []byte) ([]byte, error) {
+	if mp.version == 2 {
+		return mp.entryV2(h, key)
+	}
 	data := mp.data
 	be := binary.BigEndian
 	bk := uint64(uint32(h>>32)) % mp.buckets
@@ -153,7 +165,48 @@ func (mp *mapping) entry(h uint64, key []byte) ([]byte, error) {
 	return e[2+kl:], nil
 }
 
+// entryV2 resolves key through the PTHash table. Every hash maps to some slot, so the stored key is verified.
+func (mp *mapping) entryV2(h uint64, key []byte) ([]byte, error) {
+	var e []byte
+	if mp.compressed {
+		var err error
+		if e, err = mp.recordCompressed(h); err != nil {
+			return nil, err
+		}
+	} else {
+		slot := mp.table.Slot(h)
+		if slot >= mp.table.N { // only possible with a corrupt free-slot table
+			return nil, ErrKeyNotFound
+		}
+		o := mp.offsetsOff + int(slot)*4
+		start := binary.LittleEndian.Uint32(mp.data[o:])
+		end := binary.LittleEndian.Uint32(mp.data[o+4:])
+		if end <= start {
+			return nil, ErrKeyNotFound
+		}
+		s, stop := mp.d+int(start), mp.d+int(end)
+		if stop > mp.end {
+			return nil, ErrCorruptedBinary
+		}
+		e = mp.data[s:stop]
+	}
+	if len(e) < 2 {
+		return nil, ErrCorruptedBinary
+	}
+	kl := int(binary.BigEndian.Uint16(e))
+	if 2+kl > len(e) {
+		return nil, ErrCorruptedBinary
+	}
+	if string(e[2:2+kl]) != string(key) {
+		return nil, ErrKeyNotFound
+	}
+	return e[2+kl:], nil
+}
+
 func (mp *mapping) countRows() int {
+	if mp.version == 2 {
+		return int(mp.totalKeys)
+	}
 	mp.rowsOnce.Do(func() {
 		be := binary.BigEndian
 		n := 0
@@ -332,6 +385,10 @@ func (m *Map) Scan(fn func(key, value []byte) bool) {
 	}
 	mp.nonLookups.Add(1)
 	defer s.exit.Add(1)
+	if mp.version == 2 {
+		mp.scanV2(fn)
+		return
+	}
 	be := binary.BigEndian
 	for off := mp.r; off < mp.d; off += 8 {
 		word := be.Uint64(mp.data[off:])

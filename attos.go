@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/Attos-Labs/attos-go/internal/mmap"
+	"github.com/Attos-Labs/attos-go/internal/pthash"
 )
 
 const magicATTO = "ATTO"
@@ -155,7 +156,11 @@ func parseHeader(data []byte, checkCRC bool) (*mapping, error) {
 		return nil, fmt.Errorf("%w: file too small for version (%d bytes)", ErrCorruptedBinary, sz)
 	}
 	be := binary.BigEndian
-	if v := be.Uint32(data[4:8]); v != 1 {
+	switch v := be.Uint32(data[4:8]); v {
+	case 1:
+	case 2:
+		return parseHeaderV2(data, checkCRC)
+	default:
 		return nil, &VersionError{Version: v}
 	}
 	if sz < headerSize {
@@ -205,6 +210,69 @@ func parseHeader(data []byte, checkCRC bool) (*mapping, error) {
 		end:     int(sz - 4),
 		size:    int64(sz),
 	}, nil
+}
+
+// parseHeaderV2 validates a version 2 (PTHash) blob; see FORMAT_V2.md.
+func parseHeaderV2(data []byte, checkCRC bool) (*mapping, error) {
+	sz := uint64(len(data))
+	be := binary.BigEndian
+	if sz < headerSizeV2+4 {
+		return nil, fmt.Errorf("%w: file too small for v2 header (%d bytes)", ErrCorruptedBinary, sz)
+	}
+	t := &pthash.Table{
+		FW: data[9], BW: data[10],
+		N: be.Uint64(data[12:]), M: be.Uint64(data[20:]), NB: be.Uint64(data[28:]),
+		P2: be.Uint64(data[36:]), P1Thr: be.Uint64(data[44:]),
+	}
+	if t.N == 0 || t.M < t.N || t.M > t.N*2+16 || t.NB < 2 || t.P2 < 1 || t.P2 >= t.NB ||
+		t.FW < 1 || t.FW > 32 || t.BW < 1 || t.BW > 32 || t.N > math.MaxUint32 {
+		return nil, fmt.Errorf("%w: invalid v2 header", ErrCorruptedBinary)
+	}
+	fsz := pthash.PackedSize(t.P2, t.FW)
+	bsz := pthash.PackedSize(t.NB-t.P2, t.BW)
+	free := pthash.FreeSize(t.N, t.M)
+	flags := data[8]
+	if flags&^1 != 0 {
+		return nil, fmt.Errorf("%w: unsupported v2 flags %#x", ErrCorruptedBinary, flags)
+	}
+	mp := &mapping{data: data, version: 2, table: t, size: int64(sz), end: int(sz - 4), totalKeys: t.N}
+	nOffsets := t.N + 1
+	if flags&1 != 0 {
+		shift := data[11]
+		if shift > 8 {
+			return nil, fmt.Errorf("%w: invalid block shift", ErrCorruptedBinary)
+		}
+		mp.compressed, mp.blockShift = true, shift
+		per := uint64(1) << shift
+		nOffsets = (t.N+per-1)/per + 1
+	}
+	offBytes := (nOffsets*4 + 7) / 8 * 8
+	pos := uint64(headerSizeV2)
+	end := pos + fsz + bsz + free + offBytes
+	if end+4 > sz {
+		return nil, fmt.Errorf("%w: expected min size %d, got %d", ErrCorruptedBinary, end+4, sz)
+	}
+	t.Front = data[pos : pos+fsz]
+	pos += fsz
+	t.Back = data[pos : pos+bsz]
+	pos += bsz
+	t.Free = data[pos : pos+free]
+	pos += free
+	mp.offsetsOff = int(pos)
+	mp.d = int(end)
+	// the last offset must stay inside the file (guards every later bounds decision)
+	last := uint64(binary.LittleEndian.Uint32(data[mp.offsetsOff+int(nOffsets-1)*4:]))
+	if end+last+4 > sz {
+		return nil, fmt.Errorf("%w: blob size exceeds file", ErrCorruptedBinary)
+	}
+	if checkCRC {
+		e := sz - 4
+		want := be.Uint32(data[e:])
+		if got := crc32.ChecksumIEEE(data[:e]); got != want {
+			return nil, fmt.Errorf("%w: trailer 0x%08x, computed 0x%08x", ErrChecksumMismatch, want, got)
+		}
+	}
+	return mp, nil
 }
 
 // discardOutput is used for warmUp to prevent the compiler eliding the loop.
