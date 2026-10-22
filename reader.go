@@ -78,6 +78,8 @@ type mapping struct {
 	table      *pthash.Table
 	offsetsOff int
 	offW       int   // bytes per offset: 4 or 5
+	lean       bool  // flags bit 1: records are fingerprint|value, keys are not stored
+	fpW        int   // fingerprint bytes when lean (4 or 8)
 	compressed bool  // flags bit 0: records live in LZ4/stored blocks
 	blockShift uint8 // log2(records per block) when compressed
 	totalKeys  uint64
@@ -196,6 +198,16 @@ func (mp *mapping) entryV2(h uint64, key []byte) ([]byte, error) {
 			return nil, ErrCorruptedBinary
 		}
 		e = mp.data[s:stop]
+	}
+	if mp.lean {
+		if len(e) < mp.fpW {
+			return nil, ErrCorruptedBinary
+		}
+		fp := keyFingerprint(key)
+		if string(e[:mp.fpW]) != string(fp[:mp.fpW]) {
+			return nil, ErrKeyNotFound
+		}
+		return e[mp.fpW:], nil
 	}
 	if len(e) < 2 {
 		return nil, ErrCorruptedBinary

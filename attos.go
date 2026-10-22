@@ -241,10 +241,17 @@ func parseHeaderV2(data []byte, checkCRC bool) (*mapping, error) {
 	bsz := pthash.PackedSize(t.NB-t.P2, t.BW)
 	free := pthash.FreeSize(t.N, t.M)
 	flags := data[8]
-	if flags&^1 != 0 {
+	if flags&^3 != 0 {
 		return nil, fmt.Errorf("%w: unsupported v2 flags %#x", ErrCorruptedBinary, flags)
 	}
-	mp := &mapping{data: data, version: 2, table: t, size: int64(sz), end: int(sz - 4), totalKeys: t.N}
+	var leanW int
+	if flags&2 != 0 {
+		leanW = int(data[53])
+		if leanW != 4 && leanW != 8 {
+			return nil, fmt.Errorf("%w: invalid fingerprint width %d", ErrCorruptedBinary, data[53])
+		}
+	}
+	mp := &mapping{lean: leanW != 0, fpW: leanW, data: data, version: 2, table: t, size: int64(sz), end: int(sz - 4), totalKeys: t.N}
 	nOffsets := t.N + 1
 	if flags&1 != 0 {
 		shift := data[11]

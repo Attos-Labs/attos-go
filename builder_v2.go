@@ -40,6 +40,11 @@ type CompileOptions struct {
 	// OffsetWidth is the byte width of the offsets section: 0 chooses automatically (4 when the blob is at
 	// most 2^32-1 bytes, else 5), 4 forces 32-bit offsets, 5 forces 40-bit offsets (blobs up to 1 TiB).
 	OffsetWidth int
+	// FingerprintBytes selects lean keys: 0 stores full keys (default); 4 or 8 stores only a fingerprint
+	// of that many bytes per record instead of the key (records are fingerprint|value). Lookups verify the
+	// fingerprint, so a key that was never added is accepted with probability 2^-32 (4) or 2^-64 (8).
+	// Scan then yields the fingerprint in place of the key. See FORMAT_V2.md.
+	FingerprintBytes int
 }
 
 const maxBlob40 = 1<<40 - 1
@@ -72,13 +77,24 @@ func (b *Builder) CompileWithOptions(outPath string, opts CompileOptions) error 
 	if opts.OffsetWidth != 0 && opts.OffsetWidth != 4 && opts.OffsetWidth != 5 {
 		return errors.New("OffsetWidth must be 0 (auto), 4 or 5")
 	}
+	fpW := opts.FingerprintBytes
+	if fpW != 0 && fpW != 4 && fpW != 8 {
+		return errors.New("FingerprintBytes must be 0 (full keys), 4 or 8")
+	}
+	blobBytes := b.dataBytes // sum over rows of 2 + key + value
+	if fpW != 0 {
+		blobBytes = 0
+		for i := range b.vlens {
+			blobBytes += uint64(fpW) + uint64(b.vlens[i])
+		}
+	}
 	// Fail fast: the uncompressed blob size is known before any hashing.
 	if opts.Compression == CompressNone {
-		if b.dataBytes > maxBlob40 {
-			return fmt.Errorf("blob of %d bytes exceeds the 1 TiB limit of version 2", b.dataBytes)
+		if blobBytes > maxBlob40 {
+			return fmt.Errorf("blob of %d bytes exceeds the 1 TiB limit of version 2", blobBytes)
 		}
-		if opts.OffsetWidth == 4 && b.dataBytes > math.MaxUint32 {
-			return fmt.Errorf("blob of %d bytes needs OffsetWidth 5 (4 GiB limit of 32-bit offsets)", b.dataBytes)
+		if opts.OffsetWidth == 4 && blobBytes > math.MaxUint32 {
+			return fmt.Errorf("blob of %d bytes needs OffsetWidth 5 (4 GiB limit of 32-bit offsets)", blobBytes)
 		}
 	}
 	if b.checked < n {
@@ -107,14 +123,14 @@ func (b *Builder) CompileWithOptions(outPath string, opts CompileOptions) error 
 	var blobSrc io.Reader
 	var blobLen uint64
 	if opts.Compression == CompressLZ4 {
-		src, offs, cleanup, err := b.compressBlocks(slotEntry, shift)
+		src, offs, cleanup, err := b.compressBlocks(slotEntry, shift, fpW)
 		if err != nil {
 			return err
 		}
 		defer cleanup()
 		blockOffsets, blobSrc, blobLen = offs, src, offs[len(offs)-1]
 	} else {
-		blobLen = b.dataBytes
+		blobLen = blobBytes
 	}
 	width := opts.OffsetWidth
 	switch {
@@ -145,6 +161,10 @@ func (b *Builder) CompileWithOptions(outPath string, opts CompileOptions) error 
 		hdr[8] = 1
 		hdr[11] = shift
 	}
+	if fpW != 0 {
+		hdr[8] |= 2
+		hdr[53] = byte(fpW)
+	}
 	hdr[9], hdr[10] = t.FW, t.BW
 	if width == 5 {
 		hdr[52] = 5
@@ -172,7 +192,11 @@ func (b *Builder) CompileWithOptions(outPath string, opts CompileOptions) error 
 			o := run
 			if i < uint64(n) {
 				ei := slotEntry[i]
-				run += 2 + uint64(b.klens[ei]) + uint64(b.vlens[ei])
+				if fpW != 0 {
+					run += uint64(fpW) + uint64(b.vlens[ei])
+				} else {
+					run += 2 + uint64(b.klens[ei]) + uint64(b.vlens[ei])
+				}
 			}
 			return o
 		}
@@ -182,9 +206,14 @@ func (b *Builder) CompileWithOptions(outPath string, opts CompileOptions) error 
 		var lenBuf [2]byte
 		for s := 0; s < n; s++ {
 			ei := int(slotEntry[s])
-			be.PutUint16(lenBuf[:], b.klens[ei])
-			w.Write(lenBuf[:])
-			w.Write(b.rowKey(ei))
+			if fpW != 0 {
+				fp := keyFingerprint(b.rowKey(ei))
+				w.Write(fp[:fpW])
+			} else {
+				be.PutUint16(lenBuf[:], b.klens[ei])
+				w.Write(lenBuf[:])
+				w.Write(b.rowKey(ei))
+			}
 			w.Write(b.rowValue(ei))
 		}
 	}
@@ -201,7 +230,7 @@ func (b *Builder) CompileWithOptions(outPath string, opts CompileOptions) error 
 // method byte | uvarint(raw length) | payload, where raw = for each record uvarint(len) | record.
 // A block is stored raw when LZ4 does not make it smaller. The blob is returned as a reader (a temporary
 // file for spilling builders, memory otherwise) together with the block offsets; cleanup releases it.
-func (b *Builder) compressBlocks(slotEntry []int32, shift uint8) (io.Reader, []uint64, func(), error) {
+func (b *Builder) compressBlocks(slotEntry []int32, shift uint8, fpW int) (io.Reader, []uint64, func(), error) {
 	n := len(slotEntry)
 	per := 1 << shift
 	nBlocks := (n + per - 1) / per
@@ -232,10 +261,16 @@ func (b *Builder) compressBlocks(slotEntry []int32, shift uint8) (io.Reader, []u
 		for s := blk * per; s < (blk+1)*per && s < n; s++ {
 			ei := int(slotEntry[s])
 			ek, ev := b.rowKey(ei), b.rowValue(ei)
-			rl := 2 + len(ek) + len(ev)
-			raw = append(raw, vb[:binary.PutUvarint(vb[:], uint64(rl))]...)
-			raw = append(raw, byte(len(ek)>>8), byte(len(ek)))
-			raw = append(raw, ek...)
+			if fpW != 0 {
+				fp := keyFingerprint(ek)
+				raw = append(raw, vb[:binary.PutUvarint(vb[:], uint64(fpW+len(ev)))]...)
+				raw = append(raw, fp[:fpW]...)
+			} else {
+				rl := 2 + len(ek) + len(ev)
+				raw = append(raw, vb[:binary.PutUvarint(vb[:], uint64(rl))]...)
+				raw = append(raw, byte(len(ek)>>8), byte(len(ek)))
+				raw = append(raw, ek...)
+			}
 			raw = append(raw, ev...)
 		}
 		comp = lz4.Compress(comp[:0], raw)
@@ -302,4 +337,22 @@ func offsetsSize(count uint64, width int) uint64 {
 		sz += 8
 	}
 	return sz
+}
+
+// keyFingerprint is the lean-keys fingerprint of key: FNV-1a 64 over the key bytes, finished with the
+// PTHash mix() so all bits are well distributed; the stored fingerprint is the first 4 or 8 bytes of the
+// big-endian result. It is independent of the XXH64 hash that PTHash uses.
+func keyFingerprint(key []byte) [8]byte {
+	h := uint64(0xcbf29ce484222325)
+	for _, c := range key {
+		h = (h ^ uint64(c)) * 0x100000001b3
+	}
+	h ^= h >> 32
+	h *= 0xD6E8FEB86659FD93
+	h ^= h >> 32
+	h *= 0xD6E8FEB86659FD93
+	h ^= h >> 32
+	var out [8]byte
+	binary.BigEndian.PutUint64(out[:], h)
+	return out
 }

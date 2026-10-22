@@ -126,6 +126,12 @@ func (m *mapping) scanCompressed(fn func(key, value []byte) bool) {
 			var rec []byte
 			var ok bool
 			rec, raw, ok = nextRecord(raw)
+			if m.lean {
+				if !ok || len(rec) < m.fpW || !fn(rec[:m.fpW], rec[m.fpW:]) {
+					return
+				}
+				continue
+			}
 			if !ok || len(rec) < 2 {
 				return
 			}
@@ -152,10 +158,16 @@ func (mp *mapping) scanV2(fn func(key, value []byte) bool) {
 			continue
 		}
 		s, stop := mp.d+int(start), mp.d+int(end)
-		if stop > mp.end || stop-s < 2 {
+		if stop > mp.end || (stop-s < 2 && !mp.lean) {
 			continue
 		}
 		e := mp.data[s:stop]
+		if mp.lean {
+			if len(e) >= mp.fpW && !fn(e[:mp.fpW], e[mp.fpW:]) {
+				return
+			}
+			continue
+		}
 		kl := int(binary.BigEndian.Uint16(e))
 		if 2+kl > len(e) {
 			continue
