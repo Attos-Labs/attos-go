@@ -17,12 +17,10 @@ const (
 
 // blockBytes returns the bytes of block b (method byte included), bounds checked.
 func (m *mapping) blockBytes(b uint64) ([]byte, error) {
-	o := m.offsetsOff + int(b)*4
-	if o+8 > len(m.data) {
+	start, end := m.off(b), m.off(b+1)
+	if end > uint64(len(m.data)) {
 		return nil, ErrCorruptedBinary
 	}
-	start := binary.LittleEndian.Uint32(m.data[o:])
-	end := binary.LittleEndian.Uint32(m.data[o+4:])
 	s, e := m.d+int(start), m.d+int(end)
 	if end <= start || e > len(m.data)-4 {
 		return nil, ErrCorruptedBinary
@@ -128,6 +126,12 @@ func (m *mapping) scanCompressed(fn func(key, value []byte) bool) {
 			var rec []byte
 			var ok bool
 			rec, raw, ok = nextRecord(raw)
+			if m.lean {
+				if !ok || len(rec) < m.fpW || !fn(rec[:m.fpW], rec[m.fpW:]) {
+					return
+				}
+				continue
+			}
 			if !ok || len(rec) < 2 {
 				return
 			}
@@ -149,17 +153,21 @@ func (mp *mapping) scanV2(fn func(key, value []byte) bool) {
 		return
 	}
 	for i := uint64(0); i < mp.totalKeys; i++ {
-		o := mp.offsetsOff + int(i)*4
-		start := binary.LittleEndian.Uint32(mp.data[o:])
-		end := binary.LittleEndian.Uint32(mp.data[o+4:])
+		start, end := mp.off(i), mp.off(i+1)
 		if end <= start {
 			continue
 		}
 		s, stop := mp.d+int(start), mp.d+int(end)
-		if stop > mp.end || stop-s < 2 {
+		if stop > mp.end || (stop-s < 2 && !mp.lean) {
 			continue
 		}
 		e := mp.data[s:stop]
+		if mp.lean {
+			if len(e) >= mp.fpW && !fn(e[:mp.fpW], e[mp.fpW:]) {
+				return
+			}
+			continue
+		}
 		kl := int(binary.BigEndian.Uint16(e))
 		if 2+kl > len(e) {
 			continue

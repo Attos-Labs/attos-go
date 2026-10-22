@@ -56,3 +56,21 @@ func Munlock(data []byte) error {
 	}
 	return syscall.Munlock(data)
 }
+
+// AdviseRandom tells the kernel the mapping is accessed randomly: no readahead, so a lookup only
+// brings in the pages it touches.
+func AdviseRandom(data []byte) error {
+	if data == nil {
+		return nil
+	}
+	return syscall.Madvise(data, syscall.MADV_RANDOM)
+}
+
+// Release drops the mapping's resident pages from the process (the page cache keeps them). Used after
+// a full-file pass such as CRC validation so the whole file does not stay counted in the process RSS.
+func Release(data []byte) error {
+	if data == nil {
+		return nil
+	}
+	return syscall.Madvise(data, syscall.MADV_DONTNEED)
+}

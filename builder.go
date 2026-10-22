@@ -92,6 +92,8 @@ type Builder struct {
 	lines  []uint32
 	hashes []uint64
 
+	spill *spillStore // when set, row bytes live in a temp file and offs holds file offsets
+
 	dataBytes uint64 // sum over rows of 2 + keyLen + valueLen
 	checked   int    // rows [0, checked) are known to be duplicate-free
 }
@@ -99,11 +101,37 @@ type Builder struct {
 // NewBuilder returns an empty Builder.
 func NewBuilder() *Builder { return &Builder{} }
 
+// Grow preallocates the row index for n more rows. It avoids the transient garbage of repeated slice
+// growth when the row count is known in advance (about 26 bytes per row).
+func (b *Builder) Grow(n int) {
+	total := len(b.offs) + n
+	grow := func(old []uint64) []uint64 { return append(make([]uint64, 0, total), old...) }
+	if cap(b.offs) < total {
+		b.offs = grow(b.offs)
+		b.klens = append(make([]uint16, 0, total), b.klens...)
+		b.vlens = append(make([]uint32, 0, total), b.vlens...)
+		b.lines = append(make([]uint32, 0, total), b.lines...)
+	}
+	if cap(b.hashes) < total {
+		b.hashes = grow(b.hashes)
+	}
+}
+
 // Len returns the number of rows accumulated so far.
 func (b *Builder) Len() int { return len(b.offs) }
 
 // Reset discards all accumulated rows.
-func (b *Builder) Reset() { *b = Builder{} }
+func (b *Builder) Reset() {
+	if b.spill != nil {
+		dir := filepath.Dir(b.spill.path)
+		b.spill.close()
+		if s, err := newSpillStore(dir); err == nil {
+			*b = Builder{spill: s}
+			return
+		}
+	}
+	*b = Builder{}
+}
 
 // BuildFromCSV parses an RFC 4180 CSV file (header row required) and adds its rows.
 func (b *Builder) BuildFromCSV(csvPath string) error { return b.buildFromPath(csvPath, FormatCSV) }
@@ -164,10 +192,14 @@ type builderMark struct {
 	chunks    int
 	lastLen   int
 	dataBytes uint64
+	spillSize uint64
 }
 
 func (b *Builder) mark() builderMark {
 	m := builderMark{rows: len(b.offs), chunks: len(b.chunks), dataBytes: b.dataBytes}
+	if b.spill != nil {
+		m.spillSize = b.spill.size
+	}
 	if len(b.chunks) > 0 {
 		m.lastLen = len(b.chunks[len(b.chunks)-1])
 	}
@@ -190,6 +222,11 @@ func (b *Builder) rollback(m builderMark) {
 		b.chunks[m.chunks-1] = b.chunks[m.chunks-1][:m.lastLen]
 	}
 	b.dataBytes = m.dataBytes
+	if b.spill != nil {
+		if err := b.spill.truncate(m.spillSize); err != nil {
+			panic(fmt.Sprintf("attos: spill rollback: %v", err))
+		}
+	}
 	if b.checked > m.rows {
 		b.checked = m.rows
 	}
@@ -197,6 +234,17 @@ func (b *Builder) rollback(m builderMark) {
 
 func (b *Builder) appendRow(key, value []byte, line int) {
 	need := len(key) + len(value)
+	if b.spill != nil {
+		b.offs = append(b.offs, b.spill.append(key, value))
+		b.klens = append(b.klens, uint16(len(key)))
+		b.vlens = append(b.vlens, uint32(len(value)))
+		if line < 0 || line > math.MaxUint32 {
+			line = 0
+		}
+		b.lines = append(b.lines, uint32(line))
+		b.dataBytes += uint64(2 + need)
+		return
+	}
 	if len(b.chunks) == 0 || cap(b.chunks[len(b.chunks)-1])-len(b.chunks[len(b.chunks)-1]) < need {
 		size := arenaChunk
 		if need > size {
@@ -221,6 +269,9 @@ func (b *Builder) appendRow(key, value []byte, line int) {
 }
 
 func (b *Builder) rowKey(i int) []byte {
+	if b.spill != nil {
+		return b.spill.view(b.offs[i], int(b.klens[i]))
+	}
 	o := b.offs[i]
 	c := b.chunks[o>>32]
 	s := int(uint32(o))
@@ -228,6 +279,9 @@ func (b *Builder) rowKey(i int) []byte {
 }
 
 func (b *Builder) rowValue(i int) []byte {
+	if b.spill != nil {
+		return b.spill.view(b.offs[i]+uint64(b.klens[i]), int(b.vlens[i]))
+	}
 	o := b.offs[i]
 	c := b.chunks[o>>32]
 	s := int(uint32(o)) + int(b.klens[i])
@@ -590,7 +644,11 @@ func (b *Builder) firstDuplicate(from int) *DuplicateKeyError {
 	if best < 0 {
 		return nil
 	}
-	return &DuplicateKeyError{FirstLine: int(b.lines[bestFirst]), Line: int(b.lines[best])}
+	key := b.rowKey(best)
+	if len(key) > 64 {
+		key = key[:64]
+	}
+	return &DuplicateKeyError{FirstLine: int(b.lines[bestFirst]), Line: int(b.lines[best]), Key: string(key)}
 }
 
 // -------------------------------------------------------------- placement --

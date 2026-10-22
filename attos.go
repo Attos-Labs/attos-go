@@ -32,8 +32,12 @@ type OpenConfig struct {
 	// of this flag. Default: false (direct Open only).
 	ValidateChecksum bool
 
-	// SkipWarmUp disables the sequential page warm-up performed after mapping.
-	// Default: false (warm-up enabled).
+	// WarmUp reads every page right after mapping so the first lookups never fault. It makes the whole
+	// file resident, so resident memory equals the file size. Default: false: only the pages lookups
+	// actually touch stay in memory (with MADV_RANDOM, no readahead).
+	WarmUp bool
+
+	// SkipWarmUp is deprecated and has no effect unless WarmUp is set, in which case it wins.
 	SkipWarmUp bool
 
 	// RetireGrace is the minimum time a replaced map stays mapped after a hot
@@ -130,6 +134,11 @@ func openMapping(path string, cfg OpenConfig, checkCRC bool) (*mapping, error) {
 		mmap.Unmap(data)
 		return nil, err
 	}
+	if checkCRC {
+		// The CRC pass touched every page; do not leave the whole file counted in this process.
+		mmap.Release(data)
+	}
+	mmap.AdviseRandom(data)
 	if cfg.PinToMemory {
 		if err := mmap.Mlock(data); err != nil {
 			cfg.logger().Printf("[attos] Warning: mlock failed (non-fatal): %v", err)
@@ -137,7 +146,7 @@ func openMapping(path string, cfg OpenConfig, checkCRC bool) (*mapping, error) {
 			mp.pinned = true
 		}
 	}
-	if !cfg.SkipWarmUp {
+	if cfg.WarmUp && !cfg.SkipWarmUp {
 		warmUp(data)
 	}
 	return mp, nil
@@ -232,10 +241,17 @@ func parseHeaderV2(data []byte, checkCRC bool) (*mapping, error) {
 	bsz := pthash.PackedSize(t.NB-t.P2, t.BW)
 	free := pthash.FreeSize(t.N, t.M)
 	flags := data[8]
-	if flags&^1 != 0 {
+	if flags&^3 != 0 {
 		return nil, fmt.Errorf("%w: unsupported v2 flags %#x", ErrCorruptedBinary, flags)
 	}
-	mp := &mapping{data: data, version: 2, table: t, size: int64(sz), end: int(sz - 4), totalKeys: t.N}
+	var leanW int
+	if flags&2 != 0 {
+		leanW = int(data[53])
+		if leanW != 4 && leanW != 8 {
+			return nil, fmt.Errorf("%w: invalid fingerprint width %d", ErrCorruptedBinary, data[53])
+		}
+	}
+	mp := &mapping{lean: leanW != 0, fpW: leanW, data: data, version: 2, table: t, size: int64(sz), end: int(sz - 4), totalKeys: t.N}
 	nOffsets := t.N + 1
 	if flags&1 != 0 {
 		shift := data[11]
@@ -246,7 +262,16 @@ func parseHeaderV2(data []byte, checkCRC bool) (*mapping, error) {
 		per := uint64(1) << shift
 		nOffsets = (t.N+per-1)/per + 1
 	}
-	offBytes := (nOffsets*4 + 7) / 8 * 8
+	ow := int(data[52])
+	switch ow {
+	case 0, 4:
+		ow = 4
+	case 5:
+	default:
+		return nil, fmt.Errorf("%w: unsupported offset width %d", ErrCorruptedBinary, data[52])
+	}
+	mp.offW = ow
+	offBytes := offsetsSize(nOffsets, ow)
 	pos := uint64(headerSizeV2)
 	end := pos + fsz + bsz + free + offBytes
 	if end+4 > sz {
@@ -261,7 +286,7 @@ func parseHeaderV2(data []byte, checkCRC bool) (*mapping, error) {
 	mp.offsetsOff = int(pos)
 	mp.d = int(end)
 	// the last offset must stay inside the file (guards every later bounds decision)
-	last := uint64(binary.LittleEndian.Uint32(data[mp.offsetsOff+int(nOffsets-1)*4:]))
+	last := mp.off(nOffsets - 1)
 	if end+last+4 > sz {
 		return nil, fmt.Errorf("%w: blob size exceeds file", ErrCorruptedBinary)
 	}
