@@ -32,8 +32,12 @@ type OpenConfig struct {
 	// of this flag. Default: false (direct Open only).
 	ValidateChecksum bool
 
-	// SkipWarmUp disables the sequential page warm-up performed after mapping.
-	// Default: false (warm-up enabled).
+	// WarmUp reads every page right after mapping so the first lookups never fault. It makes the whole
+	// file resident, so resident memory equals the file size. Default: false: only the pages lookups
+	// actually touch stay in memory (with MADV_RANDOM, no readahead).
+	WarmUp bool
+
+	// SkipWarmUp is deprecated and has no effect unless WarmUp is set, in which case it wins.
 	SkipWarmUp bool
 
 	// RetireGrace is the minimum time a replaced map stays mapped after a hot
@@ -130,6 +134,11 @@ func openMapping(path string, cfg OpenConfig, checkCRC bool) (*mapping, error) {
 		mmap.Unmap(data)
 		return nil, err
 	}
+	if checkCRC {
+		// The CRC pass touched every page; do not leave the whole file counted in this process.
+		mmap.Release(data)
+	}
+	mmap.AdviseRandom(data)
 	if cfg.PinToMemory {
 		if err := mmap.Mlock(data); err != nil {
 			cfg.logger().Printf("[attos] Warning: mlock failed (non-fatal): %v", err)
@@ -137,7 +146,7 @@ func openMapping(path string, cfg OpenConfig, checkCRC bool) (*mapping, error) {
 			mp.pinned = true
 		}
 	}
-	if !cfg.SkipWarmUp {
+	if cfg.WarmUp && !cfg.SkipWarmUp {
 		warmUp(data)
 	}
 	return mp, nil
