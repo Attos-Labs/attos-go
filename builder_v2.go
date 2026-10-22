@@ -2,6 +2,7 @@ package attos
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -10,10 +11,11 @@ import (
 	"math"
 	"math/bits"
 	"os"
+	"path/filepath"
+	"runtime/debug"
 
 	"github.com/Attos-Labs/attos-go/internal/lz4"
 	"github.com/Attos-Labs/attos-go/internal/pthash"
-	"github.com/cespare/xxhash/v2"
 )
 
 const headerSizeV2 = 64
@@ -85,52 +87,45 @@ func (b *Builder) CompileWithOptions(outPath string, opts CompileOptions) error 
 		}
 		b.checked = n
 	}
-	xs := make([]uint64, n)
-	for i := range xs {
-		k := b.rowKey(i)
-		if len(k) > math.MaxUint16 {
-			return fmt.Errorf("key %d too long (%d bytes, max 65535)", i, len(k))
-		}
-		xs[i] = xxhash.Sum64(k)
+	b.ensureHashes() // XXH64 of every key; kept in the Builder, so no second copy is made
+	xs := b.hashes[:n]
+	if b.spill != nil {
+		// Keep garbage low while the index dominates the heap; restore the caller's setting afterwards.
+		defer debug.SetGCPercent(debug.SetGCPercent(20))
 	}
 	t, err := pthash.Build(xs)
 	if err != nil {
-		return err
+		return fmt.Errorf("%w (two different keys with the same 64-bit hash?)", err)
 	}
 	slotEntry := make([]int32, n)
 	for i, x := range xs {
 		slotEntry[t.Slot(x)] = int32(i)
 	}
-	var offsets []uint64
-	var blob []byte // only used when compressing
+
+	// Compressed blocks go to a temporary file (spilling builders) or memory; their offsets are small.
+	var blockOffsets []uint64
+	var blobSrc io.Reader
+	var blobLen uint64
 	if opts.Compression == CompressLZ4 {
-		var err error
-		offsets, blob, err = b.compressBlocks(slotEntry, shift)
+		src, offs, cleanup, err := b.compressBlocks(slotEntry, shift)
 		if err != nil {
 			return err
 		}
+		defer cleanup()
+		blockOffsets, blobSrc, blobLen = offs, src, offs[len(offs)-1]
 	} else {
-		offsets = make([]uint64, n+1)
-		var total uint64
-		for s := 0; s < n; s++ {
-			ei := int(slotEntry[s])
-			ek, ev := b.rowKey(ei), b.rowValue(ei)
-			offsets[s] = total
-			total += 2 + uint64(len(ek)) + uint64(len(ev))
-		}
-		offsets[n] = total
+		blobLen = b.dataBytes
 	}
 	width := opts.OffsetWidth
-	total := offsets[len(offsets)-1]
 	switch {
-	case total > maxBlob40:
-		return fmt.Errorf("blob of %d bytes exceeds the 1 TiB limit of version 2", total)
-	case width == 0 && total <= math.MaxUint32:
+	case blobLen > maxBlob40:
+		return fmt.Errorf("blob of %d bytes exceeds the 1 TiB limit of version 2", blobLen)
+	case width == 0 && blobLen <= math.MaxUint32:
 		width = 4
 	case width == 0:
 		width = 5
-	case width == 4 && total > math.MaxUint32:
-		return fmt.Errorf("blob of %d bytes needs OffsetWidth 5 (4 GiB limit of 32-bit offsets)", total)
+	case width == 4 && blobLen > math.MaxUint32:
+		return fmt.Errorf("blob of %d bytes needs OffsetWidth 5 (4 GiB limit of 32-bit offsets)", blobLen)
 	}
 
 	f, err := os.Create(outPath)
@@ -163,28 +158,34 @@ func (b *Builder) CompileWithOptions(outPath string, opts CompileOptions) error 
 	w.Write(t.Front)
 	w.Write(t.Back)
 	w.Write(t.Free)
-	ob := make([]byte, offsetsSize(uint64(len(offsets)), width))
-	for i, o := range offsets {
-		if width == 5 {
-			var tmp [8]byte
-			binary.LittleEndian.PutUint64(tmp[:], o)
-			copy(ob[i*5:], tmp[:5])
-		} else {
-			binary.LittleEndian.PutUint32(ob[i*4:], uint32(o))
-		}
-	}
-	w.Write(ob)
 	if opts.Compression == CompressLZ4 {
-		w.Write(blob)
+		if err := writeOffsets(w, uint64(len(blockOffsets)), width, func(i uint64) uint64 { return blockOffsets[i] }); err != nil {
+			return err
+		}
+		if _, err := io.Copy(w, blobSrc); err != nil {
+			return err
+		}
 	} else {
+		// Offsets come from the stored lengths alone: no record bytes are read in this pass.
+		var run uint64
+		next := func(i uint64) uint64 {
+			o := run
+			if i < uint64(n) {
+				ei := slotEntry[i]
+				run += 2 + uint64(b.klens[ei]) + uint64(b.vlens[ei])
+			}
+			return o
+		}
+		if err := writeOffsets(w, uint64(n)+1, width, next); err != nil {
+			return err
+		}
 		var lenBuf [2]byte
 		for s := 0; s < n; s++ {
 			ei := int(slotEntry[s])
-			ek, ev := b.rowKey(ei), b.rowValue(ei)
-			be.PutUint16(lenBuf[:], uint16(len(ek)))
+			be.PutUint16(lenBuf[:], b.klens[ei])
 			w.Write(lenBuf[:])
-			w.Write(ek)
-			w.Write(ev)
+			w.Write(b.rowKey(ei))
+			w.Write(b.rowValue(ei))
 		}
 	}
 	var tr [4]byte
@@ -198,16 +199,35 @@ func (b *Builder) CompileWithOptions(outPath string, opts CompileOptions) error 
 
 // compressBlocks packs the records of consecutive slots into blocks of 1<<shift records:
 // method byte | uvarint(raw length) | payload, where raw = for each record uvarint(len) | record.
-// A block is stored raw when LZ4 does not make it smaller.
-func (b *Builder) compressBlocks(slotEntry []int32, shift uint8) ([]uint64, []byte, error) {
+// A block is stored raw when LZ4 does not make it smaller. The blob is returned as a reader (a temporary
+// file for spilling builders, memory otherwise) together with the block offsets; cleanup releases it.
+func (b *Builder) compressBlocks(slotEntry []int32, shift uint8) (io.Reader, []uint64, func(), error) {
 	n := len(slotEntry)
 	per := 1 << shift
 	nBlocks := (n + per - 1) / per
 	offsets := make([]uint64, nBlocks+1)
-	var blob, raw, comp []byte
+
+	var out io.Writer
+	var mem *bytes.Buffer
+	var tmp *os.File
+	cleanup := func() {}
+	if b.spill != nil {
+		var err error
+		tmp, err = os.CreateTemp(filepath.Dir(b.spill.path), "attos-blob-*")
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		cleanup = func() { tmp.Close(); os.Remove(tmp.Name()) }
+		out = bufio.NewWriterSize(tmp, 4<<20)
+	} else {
+		mem = &bytes.Buffer{}
+		out = mem
+	}
+	var written uint64
+	var raw, comp []byte
 	var vb [binary.MaxVarintLen64]byte
 	for blk := 0; blk < nBlocks; blk++ {
-		offsets[blk] = uint64(len(blob))
+		offsets[blk] = written
 		raw = raw[:0]
 		for s := blk * per; s < (blk+1)*per && s < n; s++ {
 			ei := int(slotEntry[s])
@@ -223,15 +243,55 @@ func (b *Builder) compressBlocks(slotEntry []int32, shift uint8) ([]uint64, []by
 		if len(comp) >= len(raw) {
 			method, payload = blockStored, raw
 		}
-		blob = append(blob, method)
-		blob = append(blob, vb[:binary.PutUvarint(vb[:], uint64(len(raw)))]...)
-		blob = append(blob, payload...)
-		if uint64(len(blob)) > maxBlob40 {
-			return nil, nil, fmt.Errorf("blob of %d bytes exceeds the 1 TiB limit of version 2", len(blob))
+		hl := binary.PutUvarint(vb[:], uint64(len(raw)))
+		out.Write([]byte{method})
+		out.Write(vb[:hl])
+		out.Write(payload)
+		written += uint64(1 + hl + len(payload))
+		if written > maxBlob40 {
+			cleanup()
+			return nil, nil, nil, fmt.Errorf("blob of %d bytes exceeds the 1 TiB limit of version 2", written)
 		}
 	}
-	offsets[nBlocks] = uint64(len(blob))
-	return offsets, blob, nil
+	offsets[nBlocks] = written
+	if tmp == nil {
+		return mem, offsets, cleanup, nil
+	}
+	if err := out.(*bufio.Writer).Flush(); err != nil {
+		cleanup()
+		return nil, nil, nil, err
+	}
+	if _, err := tmp.Seek(0, io.SeekStart); err != nil {
+		cleanup()
+		return nil, nil, nil, err
+	}
+	return tmp, offsets, cleanup, nil
+}
+
+// writeOffsets writes count offsets (next(i) for i in [0, count)) at the given width, padded as offsetsSize says.
+func writeOffsets(w io.Writer, count uint64, width int, next func(i uint64) uint64) error {
+	buf := make([]byte, 0, 1<<16)
+	var tmp [8]byte
+	for i := uint64(0); i < count; i++ {
+		o := next(i)
+		if width == 5 {
+			binary.LittleEndian.PutUint64(tmp[:], o)
+			buf = append(buf, tmp[:5]...)
+		} else {
+			binary.LittleEndian.PutUint32(tmp[:], uint32(o))
+			buf = append(buf, tmp[:4]...)
+		}
+		if len(buf) >= cap(buf)-8 {
+			if _, err := w.Write(buf); err != nil {
+				return err
+			}
+			buf = buf[:0]
+		}
+	}
+	pad := int(offsetsSize(count, width) - count*uint64(width))
+	buf = append(buf, make([]byte, pad)...)
+	_, err := w.Write(buf)
+	return err
 }
 
 // offsetsSize is the byte size of the offsets section for count offsets of the given width. Width 5 adds 8

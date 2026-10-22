@@ -51,9 +51,13 @@ func (e *MalformedRowError) Unwrap() error { return ErrMalformedRow }
 // DuplicateKeyError reports a key that appears more than once.
 type DuplicateKeyError struct {
 	FirstLine, Line int
+	Key             string // the duplicated key, truncated to 64 bytes (may be empty)
 }
 
 func (e *DuplicateKeyError) Error() string {
+	if e.Key != "" {
+		return fmt.Sprintf("line %d: %v %q (first seen on line %d)", e.Line, ErrDuplicateKey, e.Key, e.FirstLine)
+	}
 	return fmt.Sprintf("line %d: %v (first seen on line %d)", e.Line, ErrDuplicateKey, e.FirstLine)
 }
 func (e *DuplicateKeyError) Unwrap() error { return ErrDuplicateKey }
