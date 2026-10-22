@@ -20,12 +20,13 @@ offset  size  field
 28      8     numBuckets nb (u64 BE)
 36      8     numFront  p2 (u64 BE)  buckets [0,p2) are "front", [p2,nb) are "back"
 44      8     p1thr        (u64 BE)  skew threshold
-52      12    reserved = 0
+52      1     offsetWidth: bytes per entry of the offsets section. 0 or 4 = u32 LE, 5 = 40-bit LE; any other value is corrupt
+53      11    reserved = 0
 64      ...   sections, in this order, no gaps:
               front pilots   PackedSize(p2, frontWidth)
               back pilots    PackedSize(nb-p2, backWidth)
               free slots     FreeSize(n, m)
-              offsets        (nOffsets*4 rounded up to a multiple of 8); nOffsets = n+1, or ceil(n / (1<<blockShift)) + 1 when compressed
+              offsets        offsetsSize(nOffsets, offsetWidth); nOffsets = n+1, or ceil(n / (1<<blockShift)) + 1 when compressed
               blob           offsets[n] bytes
               crc32          4 bytes, u32 BE, CRC32-IEEE of every preceding byte
 ```
@@ -36,7 +37,8 @@ offset  size  field
 * Pilot i of width w sits at bit offset `i*w` of its section, least-significant bit first
   (read: `(LE64(section[bit>>3 ..]) >> (bit&7)) & (2^w - 1)`).
 * free slots: `m-n` little-endian u32 values.
-* offsets: `n+1` little-endian u32 values; record of slot s is `blob[offsets[s] : offsets[s+1]]`.
+* `offsetsSize(count, w) = ceil(count*w / 8) * 8`, plus 8 bytes of slack when w = 5 (so an unaligned u64 load at any element is in bounds; mask `0xFFFFFFFFFF`). Writers choose w = 4 when the blob is at most 2^32-1 bytes, else 5; blobs above 2^40-1 bytes are rejected. Width 4 files are byte-identical to files written before this field existed.
+* offsets: `n+1` little-endian values of `offsetWidth` bytes; record of slot s is `blob[offsets[s] : offsets[s+1]]`.
 * record = `u16 BE keyLength | key bytes | value bytes` (same as v1). Readers MUST compare the stored key
   with the lookup key; the hash function maps unknown keys to arbitrary slots.
 

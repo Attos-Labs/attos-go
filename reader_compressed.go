@@ -17,12 +17,10 @@ const (
 
 // blockBytes returns the bytes of block b (method byte included), bounds checked.
 func (m *mapping) blockBytes(b uint64) ([]byte, error) {
-	o := m.offsetsOff + int(b)*4
-	if o+8 > len(m.data) {
+	start, end := m.off(b), m.off(b+1)
+	if end > uint64(len(m.data)) {
 		return nil, ErrCorruptedBinary
 	}
-	start := binary.LittleEndian.Uint32(m.data[o:])
-	end := binary.LittleEndian.Uint32(m.data[o+4:])
 	s, e := m.d+int(start), m.d+int(end)
 	if end <= start || e > len(m.data)-4 {
 		return nil, ErrCorruptedBinary
@@ -149,9 +147,7 @@ func (mp *mapping) scanV2(fn func(key, value []byte) bool) {
 		return
 	}
 	for i := uint64(0); i < mp.totalKeys; i++ {
-		o := mp.offsetsOff + int(i)*4
-		start := binary.LittleEndian.Uint32(mp.data[o:])
-		end := binary.LittleEndian.Uint32(mp.data[o+4:])
+		start, end := mp.off(i), mp.off(i+1)
 		if end <= start {
 			continue
 		}

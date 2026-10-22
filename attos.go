@@ -246,7 +246,16 @@ func parseHeaderV2(data []byte, checkCRC bool) (*mapping, error) {
 		per := uint64(1) << shift
 		nOffsets = (t.N+per-1)/per + 1
 	}
-	offBytes := (nOffsets*4 + 7) / 8 * 8
+	ow := int(data[52])
+	switch ow {
+	case 0, 4:
+		ow = 4
+	case 5:
+	default:
+		return nil, fmt.Errorf("%w: unsupported offset width %d", ErrCorruptedBinary, data[52])
+	}
+	mp.offW = ow
+	offBytes := offsetsSize(nOffsets, ow)
 	pos := uint64(headerSizeV2)
 	end := pos + fsz + bsz + free + offBytes
 	if end+4 > sz {
@@ -261,7 +270,7 @@ func parseHeaderV2(data []byte, checkCRC bool) (*mapping, error) {
 	mp.offsetsOff = int(pos)
 	mp.d = int(end)
 	// the last offset must stay inside the file (guards every later bounds decision)
-	last := uint64(binary.LittleEndian.Uint32(data[mp.offsetsOff+int(nOffsets-1)*4:]))
+	last := mp.off(nOffsets - 1)
 	if end+last+4 > sz {
 		return nil, fmt.Errorf("%w: blob size exceeds file", ErrCorruptedBinary)
 	}

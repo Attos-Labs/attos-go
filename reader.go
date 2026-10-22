@@ -77,6 +77,7 @@ type mapping struct {
 	version    uint32
 	table      *pthash.Table
 	offsetsOff int
+	offW       int   // bytes per offset: 4 or 5
 	compressed bool  // flags bit 0: records live in LZ4/stored blocks
 	blockShift uint8 // log2(records per block) when compressed
 	totalKeys  uint64
@@ -165,6 +166,14 @@ func (mp *mapping) entry(h uint64, key []byte) ([]byte, error) {
 	return e[2+kl:], nil
 }
 
+// off returns offset i of the v2 offsets section (4 or 5 bytes, little endian).
+func (mp *mapping) off(i uint64) uint64 {
+	if mp.offW == 5 {
+		return binary.LittleEndian.Uint64(mp.data[mp.offsetsOff+int(i)*5:]) & 0xFFFFFFFFFF
+	}
+	return uint64(binary.LittleEndian.Uint32(mp.data[mp.offsetsOff+int(i)*4:]))
+}
+
 // entryV2 resolves key through the PTHash table. Every hash maps to some slot, so the stored key is verified.
 func (mp *mapping) entryV2(h uint64, key []byte) ([]byte, error) {
 	var e []byte
@@ -178,9 +187,7 @@ func (mp *mapping) entryV2(h uint64, key []byte) ([]byte, error) {
 		if slot >= mp.table.N { // only possible with a corrupt free-slot table
 			return nil, ErrKeyNotFound
 		}
-		o := mp.offsetsOff + int(slot)*4
-		start := binary.LittleEndian.Uint32(mp.data[o:])
-		end := binary.LittleEndian.Uint32(mp.data[o+4:])
+		start, end := mp.off(slot), mp.off(slot+1)
 		if end <= start {
 			return nil, ErrKeyNotFound
 		}

@@ -35,7 +35,12 @@ type CompileOptions struct {
 	// BlockSize is the number of records per compressed block: a power of two from 1 to 256.
 	// Smaller blocks decompress faster but compress less. Default 8.
 	BlockSize int
+	// OffsetWidth is the byte width of the offsets section: 0 chooses automatically (4 when the blob is at
+	// most 2^32-1 bytes, else 5), 4 forces 32-bit offsets, 5 forces 40-bit offsets (blobs up to 1 TiB).
+	OffsetWidth int
 }
+
+const maxBlob40 = 1<<40 - 1
 
 // Compile writes a version 2 (.attos) file without compression. See CompileWithOptions.
 func (b *Builder) Compile(outPath string) error {
@@ -62,6 +67,18 @@ func (b *Builder) CompileWithOptions(outPath string, opts CompileOptions) error 
 	if n == 0 {
 		return errors.New("no entries to compile")
 	}
+	if opts.OffsetWidth != 0 && opts.OffsetWidth != 4 && opts.OffsetWidth != 5 {
+		return errors.New("OffsetWidth must be 0 (auto), 4 or 5")
+	}
+	// Fail fast: the uncompressed blob size is known before any hashing.
+	if opts.Compression == CompressNone {
+		if b.dataBytes > maxBlob40 {
+			return fmt.Errorf("blob of %d bytes exceeds the 1 TiB limit of version 2", b.dataBytes)
+		}
+		if opts.OffsetWidth == 4 && b.dataBytes > math.MaxUint32 {
+			return fmt.Errorf("blob of %d bytes needs OffsetWidth 5 (4 GiB limit of 32-bit offsets)", b.dataBytes)
+		}
+	}
 	if b.checked < n {
 		if d := b.firstDuplicate(b.checked); d != nil {
 			return d
@@ -84,7 +101,7 @@ func (b *Builder) CompileWithOptions(outPath string, opts CompileOptions) error 
 	for i, x := range xs {
 		slotEntry[t.Slot(x)] = int32(i)
 	}
-	var offsets []uint32
+	var offsets []uint64
 	var blob []byte // only used when compressing
 	if opts.Compression == CompressLZ4 {
 		var err error
@@ -93,18 +110,27 @@ func (b *Builder) CompileWithOptions(outPath string, opts CompileOptions) error 
 			return err
 		}
 	} else {
-		offsets = make([]uint32, n+1)
+		offsets = make([]uint64, n+1)
 		var total uint64
 		for s := 0; s < n; s++ {
 			ei := int(slotEntry[s])
 			ek, ev := b.rowKey(ei), b.rowValue(ei)
-			offsets[s] = uint32(total)
+			offsets[s] = total
 			total += 2 + uint64(len(ek)) + uint64(len(ev))
-			if total > math.MaxUint32 {
-				return errors.New("blob exceeds 4 GiB; version 2 uses 32-bit offsets")
-			}
 		}
-		offsets[n] = uint32(total)
+		offsets[n] = total
+	}
+	width := opts.OffsetWidth
+	total := offsets[len(offsets)-1]
+	switch {
+	case total > maxBlob40:
+		return fmt.Errorf("blob of %d bytes exceeds the 1 TiB limit of version 2", total)
+	case width == 0 && total <= math.MaxUint32:
+		width = 4
+	case width == 0:
+		width = 5
+	case width == 4 && total > math.MaxUint32:
+		return fmt.Errorf("blob of %d bytes needs OffsetWidth 5 (4 GiB limit of 32-bit offsets)", total)
 	}
 
 	f, err := os.Create(outPath)
@@ -125,6 +151,9 @@ func (b *Builder) CompileWithOptions(outPath string, opts CompileOptions) error 
 		hdr[11] = shift
 	}
 	hdr[9], hdr[10] = t.FW, t.BW
+	if width == 5 {
+		hdr[52] = 5
+	}
 	be.PutUint64(hdr[12:], t.N)
 	be.PutUint64(hdr[20:], t.M)
 	be.PutUint64(hdr[28:], t.NB)
@@ -134,9 +163,15 @@ func (b *Builder) CompileWithOptions(outPath string, opts CompileOptions) error 
 	w.Write(t.Front)
 	w.Write(t.Back)
 	w.Write(t.Free)
-	ob := make([]byte, (uint64(len(offsets))*4+7)/8*8)
+	ob := make([]byte, offsetsSize(uint64(len(offsets)), width))
 	for i, o := range offsets {
-		binary.LittleEndian.PutUint32(ob[i*4:], o)
+		if width == 5 {
+			var tmp [8]byte
+			binary.LittleEndian.PutUint64(tmp[:], o)
+			copy(ob[i*5:], tmp[:5])
+		} else {
+			binary.LittleEndian.PutUint32(ob[i*4:], uint32(o))
+		}
 	}
 	w.Write(ob)
 	if opts.Compression == CompressLZ4 {
@@ -164,15 +199,15 @@ func (b *Builder) CompileWithOptions(outPath string, opts CompileOptions) error 
 // compressBlocks packs the records of consecutive slots into blocks of 1<<shift records:
 // method byte | uvarint(raw length) | payload, where raw = for each record uvarint(len) | record.
 // A block is stored raw when LZ4 does not make it smaller.
-func (b *Builder) compressBlocks(slotEntry []int32, shift uint8) ([]uint32, []byte, error) {
+func (b *Builder) compressBlocks(slotEntry []int32, shift uint8) ([]uint64, []byte, error) {
 	n := len(slotEntry)
 	per := 1 << shift
 	nBlocks := (n + per - 1) / per
-	offsets := make([]uint32, nBlocks+1)
+	offsets := make([]uint64, nBlocks+1)
 	var blob, raw, comp []byte
 	var vb [binary.MaxVarintLen64]byte
 	for blk := 0; blk < nBlocks; blk++ {
-		offsets[blk] = uint32(len(blob))
+		offsets[blk] = uint64(len(blob))
 		raw = raw[:0]
 		for s := blk * per; s < (blk+1)*per && s < n; s++ {
 			ei := int(slotEntry[s])
@@ -191,10 +226,20 @@ func (b *Builder) compressBlocks(slotEntry []int32, shift uint8) ([]uint32, []by
 		blob = append(blob, method)
 		blob = append(blob, vb[:binary.PutUvarint(vb[:], uint64(len(raw)))]...)
 		blob = append(blob, payload...)
-		if len(blob) > math.MaxUint32 {
-			return nil, nil, errors.New("blob exceeds 4 GiB; version 2 uses 32-bit offsets")
+		if uint64(len(blob)) > maxBlob40 {
+			return nil, nil, fmt.Errorf("blob of %d bytes exceeds the 1 TiB limit of version 2", len(blob))
 		}
 	}
-	offsets[nBlocks] = uint32(len(blob))
+	offsets[nBlocks] = uint64(len(blob))
 	return offsets, blob, nil
+}
+
+// offsetsSize is the byte size of the offsets section for count offsets of the given width. Width 5 adds 8
+// bytes of slack so a reader can load an unaligned u64 at any element.
+func offsetsSize(count uint64, width int) uint64 {
+	sz := (count*uint64(width) + 7) / 8 * 8
+	if width == 5 {
+		sz += 8
+	}
+	return sz
 }
