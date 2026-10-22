@@ -13,6 +13,19 @@ import (
 	"github.com/Attos-Labs/attos-go/internal/pthash"
 )
 
+// WarmMode selects how much of a file OpenConfig reads in at open.
+type WarmMode int
+
+const (
+	// WarmNone maps the file lazily. Lowest resident memory; a lookup against a cold page cache pays
+	// one disk read per page it touches until the working set is cached.
+	WarmNone WarmMode = iota
+	// WarmIndex reads in everything before the record data: header, hash tables and offset table.
+	WarmIndex
+	// WarmFull reads in the whole file. Resident memory equals the file size.
+	WarmFull
+)
+
 const magicATTO = "ATTO"
 
 // headerSize is the fixed v1 header length (CONTRACTS.md §1.1).
@@ -36,6 +49,12 @@ type OpenConfig struct {
 	// file resident, so resident memory equals the file size. Default: false: only the pages lookups
 	// actually touch stay in memory (with MADV_RANDOM, no readahead).
 	WarmUp bool
+
+	// Warm selects how much of the file is read in at open: WarmNone (default) maps lazily, so only the
+	// pages lookups touch become resident; WarmIndex reads the header, hash tables and offset table
+	// (about 2-4% of the file) so a lookup against a cold page cache faults in one record page instead
+	// of three; WarmFull reads every page (same as WarmUp: true).
+	Warm WarmMode
 
 	// SkipWarmUp is deprecated and has no effect unless WarmUp is set, in which case it wins.
 	SkipWarmUp bool
@@ -146,7 +165,11 @@ func openMapping(path string, cfg OpenConfig, checkCRC bool) (*mapping, error) {
 			mp.pinned = true
 		}
 	}
-	if cfg.WarmUp && !cfg.SkipWarmUp {
+	if cfg.Warm == WarmIndex && mp.d > 0 && mp.d <= len(data) {
+		mmap.AdviseWillNeed(data[:mp.d])
+		warmUp(data[:mp.d])
+	}
+	if (cfg.WarmUp || cfg.Warm == WarmFull) && !cfg.SkipWarmUp {
 		warmUp(data)
 	}
 	return mp, nil

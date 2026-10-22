@@ -74,3 +74,11 @@ func Release(data []byte) error {
 	}
 	return syscall.Madvise(data, syscall.MADV_DONTNEED)
 }
+
+// AdviseWillNeed starts asynchronous read-in of the range (kernel readahead), without waiting.
+func AdviseWillNeed(data []byte) error {
+	if len(data) == 0 {
+		return nil
+	}
+	return syscall.Madvise(data, syscall.MADV_WILLNEED)
+}

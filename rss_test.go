@@ -59,7 +59,9 @@ func TestOpenRSS(t *testing.T) {
 	}{
 		{"default", OpenConfig{}, false},
 		{"validate", OpenConfig{ValidateChecksum: true}, false},
+		{"index", OpenConfig{Warm: WarmIndex}, false},
 		{"warmup", OpenConfig{WarmUp: true}, true},
+		{"warmfull", OpenConfig{Warm: WarmFull}, true},
 	} {
 		m, err := OpenWithConfig(p, c.cfg)
 		if err != nil {
