@@ -1,99 +1,109 @@
 # attos-go
 
-`attos-go` is the ultra-low-latency Go client SDK for the Attos Zero-Latency State Distribution Engine. It achieves sub-150ns data lookups via lock-free memory mapping of static state, allowing massive-scale edge deployment with strictly zero-allocation reads.
+`attos-go` is the Go client SDK for Attos, a zero-latency state distribution engine. Attos Cloud compiles your dataset into a static `.attos` blob. This SDK downloads it, memory-maps it, and serves lookups in-process: lock-free and allocation-free on the read path.
 
-## Features
+## 3-minute quickstart
 
-- **Sub-150ns lookups**: Direct pointer arithmetic over pre-compiled routing tables.
-- **Zero-allocation hot path**: Operates at exactly `0 B/op` overhead on read queries.
-- **Lock-free background syncing**: Employs `sync/atomic` pointer hot-swapping to update state safely without blocking readers.
-- **Zero external dependencies**: Built entirely with standard Go libraries.
+You need Go 1.24+ and a free Attos Cloud account.
 
-## Installation
+**1. Sign up** at <https://attoscloud.com/auth/signup>. Every signup gets a Free-tier personal project.
+
+**2. Create a dataset.** Save this as `sample.ndjson`:
+
+```json
+{"user_id": "user_1", "attos_value": "free"}
+{"user_id": "user_2", "attos_value": "pro"}
+{"user_id": "user_3", "attos_value": "enterprise"}
+```
+
+In the dashboard open **Datasets → Create dataset** and upload the file. When the status is `ready`, copy the dataset ID shown under the dataset name.
+
+**3. Create an API key** under **Settings → API Keys**. Copy it now: it is only shown once.
+
+**4. Look up a key.**
 
 ```bash
-go get github.com/Attos-Labs/attos-go@v0.1.0
+mkdir attos-demo && cd attos-demo
+go mod init attos-demo
+go get github.com/Attos-Labs/attos-go@latest
+export ATTOS_API_KEY="at_live_..."
+export ATTOS_DATASET_ID="<dataset id from step 2>"
 ```
 
-## Quick Start
-
-### Static Local Usage
-Instantly map and query dataset blobs directly from the local filesystem with zero I/O latency on read.
-
 ```go
+// main.go
 package main
 
 import (
+	"context"
 	"fmt"
 	"log"
+	"os"
 
-	"github.com/Attos-Labs/attos-go"
+	attos "github.com/Attos-Labs/attos-go"
 )
 
 func main() {
-	db, err := attos.Open("/var/data/rules.attos")
-	if err != nil {
-		log.Fatal(err)
-	}
-	defer db.Close()
-
-	val, err := db.GetString("user_123")
-	if err != nil {
-		log.Fatal(err)
-	}
-	
-	fmt.Println("Value:", val)
-}
-```
-
-### Cloud-Synchronized Usage
-Attach the SDK to your Attos Cloud API for real-time background polling and seamless atomic hot-swapping.
-
-```go
-package main
-
-import (
-	"fmt"
-	"log"
-	"time"
-
-	"github.com/Attos-Labs/attos-go"
-)
-
-func main() {
-	client, err := attos.NewSynchronizer(
-		"dataset_xyz",
-		attos.WithAPIKey("sk_live_..."),
-		attos.WithSyncInterval(10 * time.Minute),
+	s, err := attos.NewSynchronizer(
+		context.Background(),
+		os.Getenv("ATTOS_DATASET_ID"),
+		attos.WithBaseURL("https://api.attoscloud.com"),
+		attos.WithAPIKey(os.Getenv("ATTOS_API_KEY")),
 	)
 	if err != nil {
 		log.Fatal(err)
 	}
-	defer client.Close()
+	defer s.Close()
 
-	val, err := client.Get([]byte("user_123"))
+	v, err := s.GetString("user_2")
 	if err != nil {
 		log.Fatal(err)
 	}
-
-	fmt.Println("Value:", string(val))
+	fmt.Println("user_2 =", v)
 }
 ```
 
-## Configuration Options
+```bash
+go run .
+# user_2 = pro
+```
 
-When initializing a cloud-synchronized client via `attos.NewSynchronizer`, you can pass the following functional options:
+`NewSynchronizer` downloads the blob before it returns, so the first `Get` already works. The blob is cached in `./.attos/cache`, and the SDK re-checks for a new version every 30 seconds in the background.
+
+If it fails: `401` means the key is wrong, `404` means the dataset ID is wrong, and `409` means the dataset is still compiling, so retry in a few seconds.
+
+## Local files
+
+You can also map a `.attos` file directly, with no cloud involved:
+
+```go
+m, err := attos.Open("/var/data/rules.attos")
+if err != nil {
+	log.Fatal(err)
+}
+defer m.Close()
+
+val, err := m.GetString("user_123")
+```
+
+## Cloud sync options
+
+Pass these to `attos.NewSynchronizer(ctx, datasetID, opts...)`:
 
 | Option | Description |
 | :--- | :--- |
-| `WithAPIKey(string)` | Sets the API key used to authenticate with the Attos Cloud platform. |
-| `WithSyncInterval(time.Duration)` | Sets the background polling interval. The SDK will automatically fetch and swap to new dataset versions. |
-| `WithStoragePath(string)` | Customizes the local directory where downloaded `.attos` binary blobs are cached. |
+| `WithBaseURL(string)` | Control plane URL. Default `http://localhost:8080`, so always set it for Attos Cloud. |
+| `WithAPIKey(string)` | API key, sent as `X-API-Key`. |
+| `WithSyncInterval(time.Duration)` | Poll interval. Default 30s; `0` disables background polling. |
+| `WithCacheDir(string)` | Where the downloaded blob is cached. Default `./.attos/cache`. |
+| `WithNodeID(string)` | Node ID reported to the cloud. Defaults to `ATTOS_NODE_ID`, then the hostname. Nodes are counted by distinct ID. |
+| `WithCompression(bool)` | Ask for the gzip transfer copy. Default `true`. |
+| `WithLogger(*log.Logger)` | Logger for sync and telemetry messages. |
+| `WithTelemetryDisabled()` | Turn the telemetry emitter off. |
+| `WithOpenConfig(attos.OpenConfig)` | Checksum validation and memory pinning for the mapped blob. |
 
-## Errors Reference
+## Errors
 
-When interacting with the SDK, you may encounter the following domain-specific errors:
-
-- `attos.ErrKeyNotFound`: Returned when the requested key does not exist within the current routing table.
-- `attos.ErrInvalidBinary`: Returned during initialization if the `.attos` file signature is corrupt or improperly formatted.
-- `attos.ErrSyncFailed`: Returned when the background synchronizer fails to communicate with the Attos Cloud API.
+- `attos.ErrKeyNotFound`: the key is not in the current dataset.
+- `attos.ErrInvalidMagic`, `attos.ErrCorruptedBinary`, `attos.ErrChecksumMismatch`: the blob failed validation.
+- `*attos.StatusError`: the cloud returned a non-200 status. `Quota()` is true for plan limits (402/429); the SDK keeps serving the last good blob.
