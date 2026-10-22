@@ -25,8 +25,8 @@ In the dashboard open **Datasets → Create dataset** and upload the file. When 
 ```bash
 mkdir attos-demo && cd attos-demo
 go mod init attos-demo
-go get github.com/Attos-Labs/attos-go@latest
-export ATTOS_API_KEY="at_live_..."
+go get github.com/Attos-Labs/attos-go@main
+export ATTOS_API_KEY="nh_live_..."
 export ATTOS_DATASET_ID="<dataset id from step 2>"
 ```
 
