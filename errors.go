@@ -7,13 +7,16 @@ import (
 
 // Reader / runtime errors (CONTRACTS.md §1.6).
 var (
-	ErrKeyNotFound      = errors.New("key not found")
-	ErrCorruptedBinary  = errors.New("corrupted binary")
-	ErrInvalidMagic     = errors.New("invalid magic bytes")
-	ErrInvalidVersion   = errors.New("invalid version")
-	ErrChecksumMismatch = errors.New("checksum mismatch")
-	ErrMapClosed        = errors.New("map closed")
-	ErrMlockFailed      = errors.New("mlock failed")
+	ErrKeyNotFound     = errors.New("key not found")
+	ErrCorruptedBinary = errors.New("corrupted binary")
+	ErrInvalidMagic    = errors.New("invalid magic bytes")
+	ErrInvalidVersion  = errors.New("invalid version")
+	// ErrUnsupportedFeature is returned (via *FeatureError) for a well-formed file that uses a
+	// format feature newer than this SDK knows. The fix is to upgrade the SDK.
+	ErrUnsupportedFeature = errors.New("unsupported format feature")
+	ErrChecksumMismatch   = errors.New("checksum mismatch")
+	ErrMapClosed          = errors.New("map closed")
+	ErrMlockFailed        = errors.New("mlock failed")
 	// ErrNoMap is returned by Synchronizer lookups before the first blob is loaded.
 	ErrNoMap = errors.New("no blob loaded")
 )
@@ -22,8 +25,20 @@ var (
 // It matches ErrInvalidVersion with errors.Is.
 type VersionError struct{ Version uint32 }
 
-func (e *VersionError) Error() string { return fmt.Sprintf("invalid version: %d", e.Version) }
+func (e *VersionError) Error() string {
+	return fmt.Sprintf("invalid version: unsupported format version %d (attos-go %s reads versions 1-2); upgrade the Attos SDK", e.Version, Version)
+}
 func (e *VersionError) Unwrap() error { return ErrInvalidVersion }
+
+// FeatureError is returned when a file passes its CRC but uses a format feature this SDK
+// does not implement (an unknown flag bit, offset width or fingerprint width). It matches
+// ErrUnsupportedFeature with errors.Is. Fail-closed: the file is never partially read.
+type FeatureError struct{ Feature string }
+
+func (e *FeatureError) Error() string {
+	return fmt.Sprintf("%v: %s (attos-go %s does not support it); upgrade the Attos SDK", ErrUnsupportedFeature, e.Feature, Version)
+}
+func (e *FeatureError) Unwrap() error { return ErrUnsupportedFeature }
 
 // Builder errors (CONTRACTS.md §1.5 / §3). Typed errors unwrap to these.
 var (

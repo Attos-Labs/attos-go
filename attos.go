@@ -265,13 +265,13 @@ func parseHeaderV2(data []byte, checkCRC bool) (*mapping, error) {
 	free := pthash.FreeSize(t.N, t.M)
 	flags := data[8]
 	if flags&^3 != 0 {
-		return nil, fmt.Errorf("%w: unsupported v2 flags %#x", ErrCorruptedBinary, flags)
+		return nil, unsupportedFeature(data, fmt.Sprintf("flags %#02x (unknown bits %#02x)", flags, flags&^3), fmt.Sprintf("unsupported v2 flags %#x", flags))
 	}
 	var leanW int
 	if flags&2 != 0 {
 		leanW = int(data[53])
 		if leanW != 4 && leanW != 8 {
-			return nil, fmt.Errorf("%w: invalid fingerprint width %d", ErrCorruptedBinary, data[53])
+			return nil, unsupportedFeature(data, fmt.Sprintf("lean-key fingerprint width %d", data[53]), fmt.Sprintf("invalid fingerprint width %d", data[53]))
 		}
 	}
 	mp := &mapping{lean: leanW != 0, fpW: leanW, data: data, version: 2, table: t, size: int64(sz), end: int(sz - 4), totalKeys: t.N}
@@ -291,7 +291,7 @@ func parseHeaderV2(data []byte, checkCRC bool) (*mapping, error) {
 		ow = 4
 	case 5:
 	default:
-		return nil, fmt.Errorf("%w: unsupported offset width %d", ErrCorruptedBinary, data[52])
+		return nil, unsupportedFeature(data, fmt.Sprintf("offset width %d", data[52]), fmt.Sprintf("unsupported offset width %d", data[52]))
 	}
 	mp.offW = ow
 	offBytes := offsetsSize(nOffsets, ow)
@@ -321,6 +321,16 @@ func parseHeaderV2(data []byte, checkCRC bool) (*mapping, error) {
 		}
 	}
 	return mp, nil
+}
+
+// unsupportedFeature classifies an unknown header feature. If the file's CRC trailer
+// verifies, the file is intact and simply newer than this SDK (*FeatureError); otherwise the
+// header bytes are damaged and the error stays ErrCorruptedBinary.
+func unsupportedFeature(data []byte, feature, corrupt string) error {
+	if e := len(data) - 4; e > 0 && binary.BigEndian.Uint32(data[e:]) == crc32.ChecksumIEEE(data[:e]) {
+		return &FeatureError{Feature: feature}
+	}
+	return fmt.Errorf("%w: %s", ErrCorruptedBinary, corrupt)
 }
 
 // discardOutput is used for warmUp to prevent the compiler eliding the loop.
