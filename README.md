@@ -124,3 +124,7 @@ Pass these to `attos.NewSynchronizer(ctx, datasetID, opts...)`:
 - `attos.ErrKeyNotFound`: the key is not in the current dataset.
 - `attos.ErrInvalidMagic`, `attos.ErrCorruptedBinary`, `attos.ErrChecksumMismatch`: the blob failed validation.
 - `*attos.StatusError`: the cloud returned a non-200 status. `Quota()` is true for plan limits (402/429); the SDK keeps serving the last good blob.
+
+## Format compatibility
+
+This SDK reads `.attos` format versions 1 and 2 (PTHash, LZ4 blocks, 40-bit offsets, lean keys) from the first release that contains them, and fails closed with an error that names the unsupported feature and says to upgrade the SDK when it meets a newer file. The full table of format features against SDK versions is in [docs/FORMAT_COMPATIBILITY.md](https://github.com/Attos-Labs/attos-cloud/blob/main/docs/FORMAT_COMPATIBILITY.md).
