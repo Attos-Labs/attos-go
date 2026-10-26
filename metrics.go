@@ -74,6 +74,7 @@ func (m *Map) writeProm(w io.Writer, etag, stash string) {
 func (s *Synchronizer) WritePrometheus(w io.Writer) {
 	s.m.writeProm(w, s.ETag(), s.DatasetName())
 	promMetric(w, "attos_crc_errors_total", "counter", "Downloaded blobs rejected by the CRC32 check.", s.crcErrors.Load())
+	promMetric(w, "attos_signature_errors_total", "counter", "Files rejected because their signature was missing or invalid.", s.sigErrors.Load())
 	promMetric(w, "attos_sync_ok_total", "counter", "Sync attempts that succeeded (including not-modified).", s.syncOK.Load())
 	promMetric(w, "attos_sync_errors_total", "counter", "Failed sync attempts.", s.syncFailed.Load())
 	ts := s.TelemetryStats()

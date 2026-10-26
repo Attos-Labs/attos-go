@@ -149,6 +149,15 @@ go run github.com/Attos-Labs/attos-go/cmd/attos-size -redis host:6379  # sample 
 
 It samples up to 200,000 rows (`-sample`), builds real Attos files from the sample in three variants (Fast, Lean, Compressed), extrapolates the file size, and prints RAM saved against Redis and the equivalent monthly Redis cost. For file input the Redis size is an estimate (key + value + an assumed 56 bytes per key, `-redis-overhead`); in live mode it is measured with `MEMORY USAGE`. The price (`-redis-usd-per-gib-month`, default 25) and `-replicas` are assumptions you should replace with your own bill. Use `-json` for machine-readable output. Live mode sends only `SCAN`, `TYPE`, `GET`, `MEMORY USAGE` and `DBSIZE`; the password is read from the environment variable named by `-redis-password-env`.
 
+## Signed artifacts
+
+```go
+pub, _ := attos.ParsePublicKey("<base64 Ed25519 public key>")
+s, err := attos.NewSynchronizer(ctx, stashID, attos.WithSignatureKeys(map[string]ed25519.PublicKey{"2026-10": pub}))
+```
+
+With keys set, the synchronizer installs a file only if its `X-Attos-Signature` header verifies (Ed25519 over the file's SHA-256, bound to the stash id), and re-verifies the cached copy on restart. A missing or invalid signature is refused (`ErrSignatureMissing`, `ErrSignatureInvalid`), the current file keeps serving, and `attos_signature_errors_total` counts it. The file format is unchanged. The control plane must sign the files for this to work: see SIGNED_ARTIFACTS.md.
+
 ## Errors
 
 - `attos.ErrKeyNotFound`: the key is not in the current dataset.

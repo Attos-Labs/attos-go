@@ -3,6 +3,8 @@ package attos
 import (
 	"compress/gzip"
 	"context"
+	"crypto/ed25519"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -80,6 +82,7 @@ type Synchronizer struct {
 	logger       *log.Logger
 	httpClient   *http.Client
 	openConfig   OpenConfig
+	sigKeys      map[string]ed25519.PublicKey // non-empty: signed artifacts are enforced
 
 	telemetryInterval time.Duration
 	telemetryBaseURL  string
@@ -91,11 +94,13 @@ type Synchronizer struct {
 	datasetName atomic.Pointer[string]
 
 	syncMu       sync.Mutex // serialises Sync calls
+	pendingSig   string     // X-Attos-Signature of the body being installed; guarded by syncMu
 	etag         string     // guarded by syncMu
 	failures     int        // consecutive transient failures (poll loop only)
 	loggedStatus map[int]bool
 
 	crcErrors  atomic.Uint64 // checksum failures of downloaded blobs
+	sigErrors  atomic.Uint64 // downloaded or cached files rejected by signature verification
 	syncOK     atomic.Uint64
 	syncFailed atomic.Uint64
 
@@ -225,6 +230,12 @@ func (s *Synchronizer) loadCached() error {
 	p := s.livePath()
 	if _, err := os.Stat(p); err != nil {
 		return nil
+	}
+	if s.signingEnforced() {
+		if err := s.verifyCached(p); err != nil {
+			s.sigErrors.Add(1)
+			return fmt.Errorf("cached blob rejected: %w", err)
+		}
 	}
 	mp, err := openMapping(p, s.openConfig, true)
 	if err != nil {
@@ -381,6 +392,8 @@ func (s *Synchronizer) syncHTTP(ctx context.Context) error {
 		return se
 	}
 
+	s.pendingSig = resp.Header.Get(SignatureHeader)
+
 	body, contentLength := io.Reader(resp.Body), resp.ContentLength
 	switch enc := resp.Header.Get("Content-Encoding"); enc {
 	case "", "identity":
@@ -402,7 +415,9 @@ func (s *Synchronizer) syncHTTP(ctx context.Context) error {
 	default:
 		return fmt.Errorf("download blob: unsupported Content-Encoding %q", enc)
 	}
-	if err := s.installFrom(body, contentLength); err != nil {
+	err = s.installFrom(body, contentLength)
+	s.pendingSig = ""
+	if err != nil {
 		return err
 	}
 	s.etag = resp.Header.Get("ETag")
@@ -452,7 +467,8 @@ func (s *Synchronizer) installFrom(body io.Reader, contentLength int64) error {
 			os.Remove(tmpName)
 		}
 	}()
-	n, err := io.Copy(tmp, body)
+	hash := sha256.New()
+	n, err := io.Copy(io.MultiWriter(tmp, hash), body)
 	if err != nil {
 		if errors.Is(err, io.ErrUnexpectedEOF) {
 			return fmt.Errorf("%w: %v", ErrTruncatedDownload, err)
@@ -461,6 +477,12 @@ func (s *Synchronizer) installFrom(body io.Reader, contentLength int64) error {
 	}
 	if contentLength >= 0 && n != contentLength {
 		return fmt.Errorf("%w: got %d of %d bytes", ErrTruncatedDownload, n, contentLength)
+	}
+	if s.signingEnforced() {
+		if err := s.verifySignature(s.pendingSig, hash.Sum(nil)); err != nil {
+			s.sigErrors.Add(1)
+			return fmt.Errorf("downloaded blob rejected: %w", err)
+		}
 	}
 	if err := tmp.Sync(); err != nil {
 		return fmt.Errorf("fsync blob: %w", err)
@@ -483,6 +505,11 @@ func (s *Synchronizer) installFrom(body io.Reader, contentLength int64) error {
 		return fmt.Errorf("rename blob: %w", err)
 	}
 	keep = true
+	if s.signingEnforced() {
+		if err := os.WriteFile(s.sigPath(), []byte(s.pendingSig), 0o600); err != nil {
+			s.log("[attos] could not persist signature: %v", err)
+		}
+	}
 	if d, err := os.Open(s.cacheDir); err == nil {
 		d.Sync()
 		d.Close()
@@ -498,6 +525,9 @@ func (s *Synchronizer) installFrom(body io.Reader, contentLength int64) error {
 type statusCoder interface{ HTTPStatusCode() int }
 
 func (s *Synchronizer) syncLocalS3(ctx context.Context) error {
+	if s.signingEnforced() {
+		return fmt.Errorf("%w: local object store sync carries no signature", ErrSignatureMissing)
+	}
 	cfg, err := config.LoadDefaultConfig(ctx)
 	if err != nil {
 		return fmt.Errorf("aws config load: %w", err)
