@@ -11,6 +11,7 @@ import (
 // Recording is one atomic add; it is only touched on sampled lookups.
 type latencyHistogram struct {
 	counts [64 * 8]atomic.Uint64
+	total  [64 * 8]atomic.Uint64 // already drained by telemetry, kept for cumulative exporters
 }
 
 func histIndex(ns uint64) int {
@@ -56,6 +57,9 @@ func (h *latencyHistogram) drain() LatencySnapshot {
 	var total uint64
 	for i := range h.counts {
 		c[i] = h.counts[i].Swap(0)
+		if c[i] != 0 {
+			h.total[i].Add(c[i])
+		}
 		total += c[i]
 	}
 	s := LatencySnapshot{Samples: total}
@@ -89,3 +93,23 @@ func (h *latencyHistogram) drain() LatencySnapshot {
 // DrainLatency returns sampled lookup-latency percentiles since the previous
 // call and resets the histogram (used by the telemetry reporter).
 func (m *Map) DrainLatency() LatencySnapshot { return m.lat.drain() }
+
+// LatencyBucket is one cumulative histogram bucket: Count samples with a
+// latency of at most UpperNs nanoseconds that were not counted in a lower bucket.
+type LatencyBucket struct {
+	UpperNs uint64
+	Count   uint64
+}
+
+// LatencyBuckets returns the sampled lookup-latency histogram (1 in 256
+// lookups) as non-empty buckets in ascending order. Unlike DrainLatency it is
+// never reset, so exporters can read it at any time.
+func (m *Map) LatencyBuckets() []LatencyBucket {
+	var out []LatencyBucket
+	for i := range m.lat.counts {
+		if n := m.lat.total[i].Load() + m.lat.counts[i].Load(); n > 0 {
+			out = append(out, LatencyBucket{UpperNs: histUpper(i), Count: n})
+		}
+	}
+	return out
+}

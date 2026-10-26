@@ -60,7 +60,8 @@ const (
 type stripe struct {
 	enter atomic.Uint64
 	exit  atomic.Uint64
-	_     [48]byte // pad to a 64-byte cache line
+	miss  atomic.Uint64 // lookups that found no value
+	_     [40]byte      // pad to a 64-byte cache line
 }
 
 // mapping is one immutable, validated, mmap'd blob.
@@ -89,6 +90,7 @@ type mapping struct {
 	retired    atomic.Bool
 	readers    [readerStripes]stripe
 	nonLookups atomic.Uint64 // pinned operations that are not lookups (Len, Scan)
+	batchExtra atomic.Uint64 // lookups served beyond the one counted per pin (GetMany)
 
 	rowsOnce sync.Once
 	rows     int
@@ -119,7 +121,15 @@ func (mp *mapping) lookups() uint64 {
 	for i := range mp.readers {
 		n += mp.readers[i].exit.Load()
 	}
-	return n - mp.nonLookups.Load()
+	return n - mp.nonLookups.Load() + mp.batchExtra.Load()
+}
+
+func (mp *mapping) misses() uint64 {
+	var n uint64
+	for i := range mp.readers {
+		n += mp.readers[i].miss.Load()
+	}
+	return n
 }
 
 // waitDrained spins (with backoff) until no reader is inside mp.
@@ -254,6 +264,7 @@ type Map struct {
 	retireWG   sync.WaitGroup
 
 	retiredLookups atomic.Uint64 // lookups served by already-unmapped mappings
+	retiredMisses  atomic.Uint64
 	swaps          atomic.Uint64
 	closeOnce      sync.Once
 	closeErr       error
@@ -292,6 +303,13 @@ func (m *Map) enter(h uint64) (*mapping, *stripe, uint64) {
 	}
 }
 
+// noteMiss counts a lookup that found no value.
+func (s *stripe) noteMiss(err error) {
+	if err == ErrKeyNotFound {
+		s.miss.Add(1)
+	}
+}
+
 func (m *Map) noMapErr() error {
 	if m.closed.Load() {
 		return ErrMapClosed
@@ -313,10 +331,12 @@ func (m *Map) Get(key []byte) ([]byte, error) {
 	}
 	if n&sampleMask == 0 {
 		v, err := m.entryTimed(mp, h, key)
+		s.noteMiss(err)
 		s.exit.Add(1)
 		return v, err
 	}
 	v, err := mp.entry(h, key)
+	s.noteMiss(err)
 	s.exit.Add(1)
 	return v, err
 }
@@ -366,6 +386,7 @@ func (m *Map) GetCopy(key, dst []byte) ([]byte, error) {
 	if err == nil {
 		dst = append(dst, v...)
 	}
+	s.noteMiss(err)
 	s.exit.Add(1)
 	return dst, err
 }
@@ -388,6 +409,7 @@ func (m *Map) View(key []byte, fn func(value []byte)) error {
 		v, err = mp.entry(h, key)
 	}
 	if err != nil {
+		s.noteMiss(err)
 		return err
 	}
 	fn(v)
@@ -459,6 +481,16 @@ func (m *Map) Lookups() uint64 {
 	return n
 }
 
+// Misses returns the number of lookups that found no value.
+// Hits are Lookups() - Misses().
+func (m *Map) Misses() uint64 {
+	n := m.retiredMisses.Load()
+	if mp := m.cur.Load(); mp != nil {
+		n += mp.misses()
+	}
+	return n
+}
+
 // Swaps returns how many times the mapping has been replaced.
 func (m *Map) Swaps() uint64 { return m.swaps.Load() }
 
@@ -515,6 +547,7 @@ func (m *Map) retire(old *mapping, grace time.Duration) {
 		}
 	}
 	m.retiredLookups.Add(old.lookups())
+	m.retiredMisses.Add(old.misses())
 	if err := old.unmap(); err != nil {
 		m.cfg.logger().Printf("[attos] Warning: munmap of retired map failed: %v", err)
 	}
@@ -549,6 +582,7 @@ func (m *Map) Close() error {
 			old.retired.Store(true)
 			old.waitDrained()
 			m.retiredLookups.Add(old.lookups())
+			m.retiredMisses.Add(old.misses())
 			m.closeErr = old.unmap()
 		}
 		m.retireWG.Wait()

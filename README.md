@@ -119,6 +119,26 @@ Pass these to `attos.NewSynchronizer(ctx, datasetID, opts...)`:
 | `WithTelemetryDisabled()` | Turn the telemetry emitter off. |
 | `WithOpenConfig(attos.OpenConfig)` | Checksum validation and memory pinning for the mapped blob. |
 
+## Batch lookups and typed values
+
+```go
+out := make([][]byte, len(keys))
+found, err := m.GetMany(keys, out) // out[i] == nil when keys[i] is absent
+```
+
+`GetMany` pins the mapping once and reads a group of keys' table entries together, so it costs a little less per key than repeated `Get` on large files (measured at roughly 6-10 % on the 15M-key benchmark file; `ATTOS_BENCH_FILE=your.attos go test -run xxx -bench 'Single|Batch'` measures your own). Batch calls count as lookups but are not latency-sampled, and make no allocations.
+
+Values are opaque bytes. If yours are structured, `Schema` reads fixed layouts (big-endian numbers, `u16`-length strings) straight from the value, using the same layout as the Rust and Java SDKs:
+
+```go
+sc := attos.NewSchema(attos.Field{"id", attos.U64}, attos.Field{"name", attos.String})
+name, err := sc.String(value, "name")
+```
+
+## Metrics
+
+`http.Handle("/metrics", attos.MetricsHandler(sync))` serves Prometheus text: lookups, misses and hit ratio, a sampled lookup-latency histogram (1 in 256 lookups), hot swaps, CRC and sync errors, and `attos_file_info{format_version,etag,stash}` for the file in use. Scraping reads counters the SDK keeps anyway; lookups stay allocation-free.
+
 ## Errors
 
 - `attos.ErrKeyNotFound`: the key is not in the current dataset.
