@@ -11,7 +11,7 @@ import (
 	"strings"
 )
 
-// Signed artifacts (docs: SIGNED_ARTIFACTS.md).
+// Signed artifacts.
 //
 // The control plane can sign every dataset file with an Ed25519 key. The
 // signature travels in the X-Attos-Signature response header, detached from the

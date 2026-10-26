@@ -156,7 +156,7 @@ pub, _ := attos.ParsePublicKey("<base64 Ed25519 public key>")
 s, err := attos.NewSynchronizer(ctx, stashID, attos.WithSignatureKeys(map[string]ed25519.PublicKey{"2026-10": pub}))
 ```
 
-With keys set, the synchronizer installs a file only if its `X-Attos-Signature` header verifies (Ed25519 over the file's SHA-256, bound to the stash id), and re-verifies the cached copy on restart. A missing or invalid signature is refused (`ErrSignatureMissing`, `ErrSignatureInvalid`), the current file keeps serving, and `attos_signature_errors_total` counts it. The file format is unchanged. The control plane must sign the files for this to work: see SIGNED_ARTIFACTS.md.
+With keys set, the synchronizer installs a file only if its `X-Attos-Signature` header verifies (Ed25519 over the file's SHA-256, bound to the stash id), and re-verifies the cached copy on restart. A missing or invalid signature is refused (`ErrSignatureMissing`, `ErrSignatureInvalid`), the current file keeps serving, and `attos_signature_errors_total` counts it. The file format is unchanged, and deltas are not requested while signing is enforced because they are unsigned. The signed message is `"attos-artifact-v1\0" + stash_id + "\0" + SHA-256(file)`, and the header is `alg=ed25519; kid=<id>; sig=<base64>`. The control plane must sign the files for this to work; do not enable enforcement until it does.
 
 ## Errors
 
