@@ -139,6 +139,16 @@ name, err := sc.String(value, "name")
 
 `http.Handle("/metrics", attos.MetricsHandler(sync))` serves Prometheus text: lookups, misses and hit ratio, a sampled lookup-latency histogram (1 in 256 lookups), hot swaps, CRC and sync errors, and `attos_file_info{format_version,etag,stash}` for the file in use. Scraping reads counters the SDK keeps anyway; lookups stay allocation-free.
 
+## Sizing against Redis: `attos-size`
+
+```bash
+go run github.com/Attos-Labs/attos-go/cmd/attos-size data.csv          # Attos input format (attos_value column)
+go run github.com/Attos-Labs/attos-go/cmd/attos-size -kv export.csv    # headerless key,value CSV, e.g. a Redis export
+go run github.com/Attos-Labs/attos-go/cmd/attos-size -redis host:6379  # sample a live Redis (read-only commands only)
+```
+
+It samples up to 200,000 rows (`-sample`), builds real Attos files from the sample in three variants (Fast, Lean, Compressed), extrapolates the file size, and prints RAM saved against Redis and the equivalent monthly Redis cost. For file input the Redis size is an estimate (key + value + an assumed 56 bytes per key, `-redis-overhead`); in live mode it is measured with `MEMORY USAGE`. The price (`-redis-usd-per-gib-month`, default 25) and `-replicas` are assumptions you should replace with your own bill. Use `-json` for machine-readable output. Live mode sends only `SCAN`, `TYPE`, `GET`, `MEMORY USAGE` and `DBSIZE`; the password is read from the environment variable named by `-redis-password-env`.
+
 ## Errors
 
 - `attos.ErrKeyNotFound`: the key is not in the current dataset.

@@ -6,6 +6,7 @@
 * `Map.GetMany`: batch lookup that pins the mapping once and issues a group of keys' table reads together (zero allocations; about 6-10 % less time per key than `Get` on the 15M-key benchmark file with random keys, a quiet-host figure is still to be measured).
 * `Schema`: optional typed values (fixed layout shared with the Rust and Java SDKs; no format change).
 * Metrics: `Map.Misses`, `Map.LatencyBuckets`, `Map.WritePrometheus`, `Synchronizer.WritePrometheus` and `MetricsHandler` (hit ratio, lookup latency histogram, file version, sync and CRC errors).
+* `cmd/attos-size`: samples a CSV, a key,value export or a live Redis and prints projected Attos file sizes, RAM saved and equivalent Redis cost.
 
 ## v1.3.0 (2026-10-22)
 
