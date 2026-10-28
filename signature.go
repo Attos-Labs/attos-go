@@ -104,7 +104,7 @@ func (s *Synchronizer) verifySignature(header string, digest []byte) error {
 	if err != nil || len(raw) != ed25519.SignatureSize {
 		return fmt.Errorf("%w: malformed signature", ErrSignatureInvalid)
 	}
-	if !ed25519.Verify(pub, signedMessage(s.datasetID, digest), raw) {
+	if !ed25519.Verify(pub, signedMessage(s.stashID, digest), raw) {
 		return fmt.Errorf("%w: does not match the file", ErrSignatureInvalid)
 	}
 	return nil

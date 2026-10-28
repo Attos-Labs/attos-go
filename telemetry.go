@@ -188,7 +188,7 @@ func (t *telemetryEmitter) build() *telemetryReport {
 	}
 	var rs otelResourceSpan
 	rs.Resource.Attributes = []otelAttr{
-		{"attos.dataset_id", otelValue{t.s.datasetID}},
+		{"attos.dataset_id", otelValue{t.s.stashID}},
 		{"attos.node_id", otelValue{t.s.nodeID}},
 		{"sdk.version", otelValue{"go-" + Version}},
 	}

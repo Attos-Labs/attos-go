@@ -15,13 +15,13 @@ func main() {
 		log.Fatal("set NH_API_KEY environment variable")
 	}
 
-	datasetID := os.Getenv("NH_DATASET_ID")
-	if datasetID == "" {
+	stashID := os.Getenv("NH_DATASET_ID")
+	if stashID == "" {
 		log.Fatal("set NH_DATASET_ID environment variable")
 	}
 
 	ctx := context.Background()
-	client, err := attos.NewSynchronizer(ctx, datasetID, attos.WithAPIKey(apiKey))
+	client, err := attos.NewSynchronizer(ctx, stashID, attos.WithAPIKey(apiKey))
 	if err != nil {
 		log.Fatalf("failed to initialize synchronizer: %v", err)
 	}

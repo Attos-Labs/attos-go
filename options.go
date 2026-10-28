@@ -15,7 +15,7 @@ func WithBaseURL(url string) Option {
 	return func(s *Synchronizer) { s.baseURL = url }
 }
 
-// WithCacheDir sets the directory holding the live blob (<datasetID>.attos),
+// WithCacheDir sets the directory holding the live blob (<stashID>.attos),
 // its ETag and in-progress downloads (always in the same directory, so the
 // final rename is atomic). Default: "./.attos/cache".
 func WithCacheDir(dir string) Option {

@@ -105,7 +105,7 @@ val, err := m.GetString("user_123")
 
 ## Cloud sync options
 
-Pass these to `attos.NewSynchronizer(ctx, datasetID, opts...)`:
+Pass these to `attos.NewSynchronizer(ctx, stashID, opts...)`:
 
 | Option | Description |
 | :--- | :--- |

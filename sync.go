@@ -75,7 +75,7 @@ type Synchronizer struct {
 	apiKey       string
 	baseURL      string
 	cacheDir     string
-	datasetID    string
+	stashID      string
 	syncInterval time.Duration
 	nodeID       string
 	noGzip       bool // WithCompression(false): ask for the raw blob
@@ -89,9 +89,9 @@ type Synchronizer struct {
 	telemetryAPIKey   string
 	telemetryOff      bool
 
-	config      atomic.Pointer[Config]
-	m           *Map
-	datasetName atomic.Pointer[string]
+	config    atomic.Pointer[Config]
+	m         *Map
+	stashName atomic.Pointer[string]
 
 	syncMu       sync.Mutex // serialises Sync calls
 	pendingSig   string     // X-Attos-Signature of the body being installed; guarded by syncMu
@@ -124,19 +124,19 @@ func (s *Synchronizer) log(format string, args ...any) {
 	l.Printf(format, args...)
 }
 
-// NewSynchronizer creates and initialises a Synchronizer for datasetID.
+// NewSynchronizer creates and initialises a Synchronizer for stashID.
 //
 // It first loads a previously synced blob from the cache directory (if one
 // exists and validates), then performs an initial Sync. If that sync fails but
 // a cached blob is loaded, the error is logged and the cached data is served;
 // with no data at all the error is returned. Background polling runs every
 // WithSyncInterval (default DefaultSyncInterval; 0 disables polling).
-func NewSynchronizer(ctx context.Context, datasetID string, opts ...Option) (*Synchronizer, error) {
-	if datasetID == "" {
-		return nil, errors.New("attos: datasetID is required")
+func NewSynchronizer(ctx context.Context, stashID string, opts ...Option) (*Synchronizer, error) {
+	if stashID == "" {
+		return nil, errors.New("attos: stashID is required")
 	}
 	s := &Synchronizer{
-		datasetID:         datasetID,
+		stashID:           stashID,
 		baseURL:           defaultBaseURL,
 		cacheDir:          "./.attos/cache",
 		nodeID:            defaultNodeID(),
@@ -162,7 +162,7 @@ func NewSynchronizer(ctx context.Context, datasetID string, opts ...Option) (*Sy
 	}
 	s.removeStaleTemps()
 	if err := s.loadCached(); err != nil {
-		s.log("[attos] cached blob for %s not usable: %v", s.datasetID, err)
+		s.log("[attos] cached blob for %s not usable: %v", s.stashID, err)
 	}
 
 	var err error
@@ -212,10 +212,10 @@ func sleepCtx(ctx context.Context, d time.Duration) bool {
 	}
 }
 
-func (s *Synchronizer) livePath() string { return filepath.Join(s.cacheDir, s.datasetID+".attos") }
-func (s *Synchronizer) etagPath() string { return filepath.Join(s.cacheDir, s.datasetID+".etag") }
+func (s *Synchronizer) livePath() string { return filepath.Join(s.cacheDir, s.stashID+".attos") }
+func (s *Synchronizer) etagPath() string { return filepath.Join(s.cacheDir, s.stashID+".etag") }
 func (s *Synchronizer) tempPattern() string {
-	return "." + s.datasetID + ".attos.download-*"
+	return "." + s.stashID + ".attos.download-*"
 }
 
 func (s *Synchronizer) removeStaleTemps() {
@@ -355,7 +355,7 @@ func (s *Synchronizer) Sync(ctx context.Context) error {
 }
 
 func (s *Synchronizer) syncHTTP(ctx context.Context) error {
-	url := fmt.Sprintf("%s/api/v1/datasets/sync/%s", s.baseURL, s.datasetID)
+	url := fmt.Sprintf("%s/api/v1/datasets/sync/%s", s.baseURL, s.stashID)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return fmt.Errorf("create request: %w", err)
@@ -424,7 +424,7 @@ func (s *Synchronizer) syncHTTP(ctx context.Context) error {
 	s.persistETag()
 	s.applyConfigHeader(resp.Header.Get("X-Attos-Config"))
 	if name := resp.Header.Get("X-Dataset-Name"); name != "" {
-		s.datasetName.Store(&name)
+		s.stashName.Store(&name)
 	}
 	return nil
 }
@@ -535,7 +535,7 @@ func (s *Synchronizer) syncLocalS3(ctx context.Context) error {
 	client := s3.NewFromConfig(cfg)
 	in := &s3.GetObjectInput{
 		Bucket: aws.String(s.openConfig.LocalS3Bucket),
-		Key:    aws.String(s.datasetID + ".attos"),
+		Key:    aws.String(s.stashID + ".attos"),
 	}
 	if s.etag != "" && s.m.cur.Load() != nil {
 		in.IfNoneMatch = aws.String(s.etag)
@@ -577,9 +577,15 @@ func (s *Synchronizer) ETag() string {
 	return s.etag
 }
 
-// DatasetName returns the last X-Dataset-Name received ("" if none).
-func (s *Synchronizer) DatasetName() string {
-	if p := s.datasetName.Load(); p != nil {
+// DatasetName returns the stash's display name.
+//
+// Deprecated: datasets are now called stashes; use StashName.
+func (s *Synchronizer) DatasetName() string { return s.StashName() }
+
+// StashName returns the stash's display name as sent by the control plane
+// (the X-Dataset-Name header, "" if none).
+func (s *Synchronizer) StashName() string {
+	if p := s.stashName.Load(); p != nil {
 		return *p
 	}
 	return ""
