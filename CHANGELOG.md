@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.4.0 - 2026-10-31
 
 * Rename dataset to stash in the public API: `Synchronizer.StashName()` (`DatasetName()` is deprecated) and the `stashID` parameter of `NewSynchronizer`. The wire protocol is unchanged.
 * Fail closed with an explicit error when a file uses a format feature newer than the SDK: `*FeatureError` (`errors.Is(err, ErrUnsupportedFeature)`) for unknown flag bits, offset widths and fingerprint widths on an intact file; `VersionError` now says to upgrade.
