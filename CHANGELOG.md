@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+* `GetCopy` and `View` no longer allocate on LZ4 files (the decoded block lives in a pooled scratch buffer; the value is copied into the caller's buffer or passed to the callback). `Get` still allocates one copy per lookup on LZ4 files because its result outlives the call: use `GetCopy` or `View` when you run LZ4. LZ4 lookups decode a whole block, so they stay slower than plain files (about 2x P50 on the 15M-key benchmark); the sub-microsecond P99 figure applies to plain v2 files only.
+
 ## 1.4.0 - 2026-10-31
 
 * Rename dataset to stash in the public API: `Synchronizer.StashName()` (`DatasetName()` is deprecated) and the `stashID` parameter of `NewSynchronizer`. The wire protocol is unchanged.

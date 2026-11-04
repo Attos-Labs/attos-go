@@ -72,9 +72,11 @@ func nextRecord(raw []byte) (rec, rest []byte, ok bool) {
 	return raw[n : n+int(l)], raw[n+int(l):], true
 }
 
-// recordCompressed locates the record for keyHash inside its block. Copying the record out means
-// compressed datasets allocate on every lookup; see FORMAT_V2.md for the latency trade-off.
-func (m *mapping) recordCompressed(keyHash uint64) ([]byte, error) {
+// recordCompressed locates the record for keyHash inside its block. With sp == nil the record is
+// copied out (one allocation per lookup, what Get needs because its result outlives the call). With
+// a scratch buffer from scratchPool the record aliases it: the caller owns sp until it is done with
+// the record, which makes GetCopy and View allocation-free on compressed files.
+func (m *mapping) recordCompressed(keyHash uint64, sp *[]byte) ([]byte, error) {
 	slot := m.table.Slot(keyHash)
 	if slot >= m.table.N {
 		return nil, ErrKeyNotFound
@@ -83,8 +85,11 @@ func (m *mapping) recordCompressed(keyHash uint64) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	sp := scratchPool.Get().(*[]byte)
-	defer scratchPool.Put(sp)
+	own := sp == nil
+	if own {
+		sp = scratchPool.Get().(*[]byte)
+		defer scratchPool.Put(sp)
+	}
 	raw, err := decodeBlock(blk, sp)
 	if err != nil {
 		return nil, err
@@ -100,7 +105,10 @@ func (m *mapping) recordCompressed(keyHash uint64) ([]byte, error) {
 			break
 		}
 	}
-	// rec aliases either the mapping (stored block) or a pooled scratch buffer: always hand out a copy.
+	if !own {
+		return rec, nil
+	}
+	// rec aliases either the mapping (stored block) or a pooled scratch buffer: hand out a copy.
 	return append([]byte(nil), rec...), nil
 }
 

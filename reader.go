@@ -178,6 +178,22 @@ func (mp *mapping) entry(h uint64, key []byte) ([]byte, error) {
 	return e[2+kl:], nil
 }
 
+// entryScratch resolves key in a compressed v2 mapping into the caller's scratch buffer.
+func (mp *mapping) entryScratch(h uint64, key []byte, sp *[]byte) ([]byte, error) {
+	return mp.entryV2s(h, key, sp)
+}
+
+// entryScratchTimed is entryScratch plus the 1-in-256 latency sample every accessor contributes.
+func (m *Map) entryScratchTimed(mp *mapping, h uint64, key []byte, sp *[]byte, n uint64) ([]byte, error) {
+	if n&sampleMask != 0 {
+		return mp.entryScratch(h, key, sp)
+	}
+	t0 := time.Now()
+	v, err := mp.entryScratch(h, key, sp)
+	m.lat.record(time.Since(t0))
+	return v, err
+}
+
 // off returns offset i of the v2 offsets section (4 or 5 bytes, little endian).
 func (mp *mapping) off(i uint64) uint64 {
 	if mp.offW == 5 {
@@ -187,11 +203,15 @@ func (mp *mapping) off(i uint64) uint64 {
 }
 
 // entryV2 resolves key through the PTHash table. Every hash maps to some slot, so the stored key is verified.
-func (mp *mapping) entryV2(h uint64, key []byte) ([]byte, error) {
+func (mp *mapping) entryV2(h uint64, key []byte) ([]byte, error) { return mp.entryV2s(h, key, nil) }
+
+// entryV2s is entryV2 with an optional scratch buffer (see recordCompressed): with sp set, the
+// returned value of a compressed file aliases *sp and is valid until the caller releases it.
+func (mp *mapping) entryV2s(h uint64, key []byte, sp *[]byte) ([]byte, error) {
 	var e []byte
 	if mp.compressed {
 		var err error
-		if e, err = mp.recordCompressed(h); err != nil {
+		if e, err = mp.recordCompressed(h, sp); err != nil {
 			return nil, err
 		}
 	} else {
@@ -322,7 +342,8 @@ const sampleMask = 255
 
 // Get performs an O(1) lookup and returns a zero-copy slice of the value.
 // See the package comment above for the validity window; use GetCopy or View
-// to keep the value longer. Zero allocations.
+// to keep the value longer. Zero allocations on plain files; on LZ4 files Get copies
+// the record (one allocation), so use GetCopy or View there.
 func (m *Map) Get(key []byte) ([]byte, error) {
 	h := xxhash.Sum64(key)
 	mp, s, n := m.enter(h)
@@ -378,13 +399,20 @@ func (m *Map) GetCopy(key, dst []byte) ([]byte, error) {
 	}
 	var v []byte
 	var err error
-	if n&sampleMask == 0 {
+	var sp *[]byte
+	if mp.compressed {
+		sp = scratchPool.Get().(*[]byte) // value aliases sp until it is copied below: no allocation
+		v, err = m.entryScratchTimed(mp, h, key, sp, n)
+	} else if n&sampleMask == 0 {
 		v, err = m.entryTimed(mp, h, key)
 	} else {
 		v, err = mp.entry(h, key)
 	}
 	if err == nil {
 		dst = append(dst, v...)
+	}
+	if sp != nil {
+		scratchPool.Put(sp)
 	}
 	s.noteMiss(err)
 	s.exit.Add(1)
@@ -403,7 +431,12 @@ func (m *Map) View(key []byte, fn func(value []byte)) error {
 	defer s.exit.Add(1)
 	var v []byte
 	var err error
-	if n&sampleMask == 0 {
+	var sp *[]byte
+	if mp.compressed {
+		sp = scratchPool.Get().(*[]byte)
+		defer scratchPool.Put(sp)
+		v, err = m.entryScratchTimed(mp, h, key, sp, n)
+	} else if n&sampleMask == 0 {
 		v, err = m.entryTimed(mp, h, key)
 	} else {
 		v, err = mp.entry(h, key)
