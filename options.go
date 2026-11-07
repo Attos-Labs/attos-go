@@ -123,3 +123,17 @@ func withJitterSource(f func() float64) Option {
 
 // withClock injects the clock used for the redirect cool-down (tests).
 func withClock(f func() time.Time) Option { return func(s *Synchronizer) { s.nowFn = f } }
+
+// WithRedirectHosts adds hosts a signed-download redirect may point at, on top of Google Cloud Storage
+// (storage.googleapis.com and *.storage.googleapis.com). Entries are exact hosts or "*.domain" wildcards; the
+// ATTOS_REDIRECT_HOSTS environment variable (comma separated) is added to them. Targets must be https, without
+// userinfo, on port 443.
+func WithRedirectHosts(hosts ...string) Option {
+	return func(s *Synchronizer) { s.redirectHosts = append(s.redirectHosts, hosts...) }
+}
+
+// WithTestRedirectTargets lifts the redirect host policy so that redirects may go to http hosts, IP literals and
+// any name. It exists for tests against emulators (fake-gcs-server, httptest) and must not be used in production.
+func WithTestRedirectTargets() Option {
+	return func(s *Synchronizer) { s.redirectAny = true }
+}

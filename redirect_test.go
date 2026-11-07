@@ -31,15 +31,23 @@ type redirectEnv struct {
 	gzipped  bool
 	storeMod func(w http.ResponseWriter, body []byte) // alters what the store serves; nil = intact
 	obj      []byte                                   // what the store serves at /obj
+	location string                                   // when set, the 302 points here instead of at the store
 
 	apiReqs   []http.Header
 	storeReqs []http.Header
 	apiMu     sync.Mutex
 }
 
-func newRedirectEnv(t *testing.T, blob []byte) *redirectEnv {
+func newRedirectEnv(t *testing.T, blob []byte) *redirectEnv { return newRedirectEnvTLS(t, blob, false) }
+
+// newRedirectEnvTLS can serve the download from an https server (cert valid for example.com and 127.0.0.1).
+func newRedirectEnvTLS(t *testing.T, blob []byte, useTLS bool) *redirectEnv {
 	e := &redirectEnv{t: t, blob: blob, etag: `"1"`}
-	e.store = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	newStore := httptest.NewServer
+	if useTLS {
+		newStore = httptest.NewTLSServer
+	}
+	e.store = newStore(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		e.apiMu.Lock()
 		e.storeReqs = append(e.storeReqs, r.Header.Clone())
 		mod, body := e.storeMod, e.obj
@@ -102,7 +110,11 @@ func newRedirectEnv(t *testing.T, blob []byte) *redirectEnv {
 		e.apiMu.Unlock()
 		w.Header().Set(contentLengthHdr, fmt.Sprint(len(served)))
 		w.Header().Set("Cache-Control", "private, no-store")
-		w.Header().Set("Location", e.store.URL+"/obj?X-Goog-Signature=abc")
+		loc := e.store.URL + "/obj?X-Goog-Signature=abc"
+		if e.location != "" {
+			loc = e.location
+		}
+		w.Header().Set("Location", loc)
 		w.WriteHeader(http.StatusFound)
 	}))
 	t.Cleanup(e.api.Close)
@@ -110,7 +122,12 @@ func newRedirectEnv(t *testing.T, blob []byte) *redirectEnv {
 	return e
 }
 
+// sync is a node that may follow redirects to the test servers (http, loopback); syncStrict keeps the production host policy.
 func (e *redirectEnv) sync(t *testing.T, opts ...Option) *Synchronizer {
+	return e.syncStrict(t, append([]Option{WithTestRedirectTargets()}, opts...)...)
+}
+
+func (e *redirectEnv) syncStrict(t *testing.T, opts ...Option) *Synchronizer {
 	all := append([]Option{WithBaseURL(e.api.URL), WithCacheDir(t.TempDir()), WithAPIKey("secret-api-key"), WithNodeID("node-1"),
 		WithSyncInterval(0), WithTelemetryInterval(0), WithLogger(testLogger(t)), withJitterSource(func() float64 { return 0 })}, opts...)
 	s, err := NewSynchronizer(context.Background(), "ds-1", all...)
@@ -266,7 +283,7 @@ func TestOrdinaryRedirectDoesNotForwardCredentials(t *testing.T) {
 	}))
 	defer api.Close()
 	s, err := NewSynchronizer(context.Background(), "ds-1", WithBaseURL(api.URL), WithCacheDir(t.TempDir()), WithAPIKey("secret-api-key"),
-		WithNodeID("node-1"), WithSyncInterval(0), WithTelemetryInterval(0), WithLogger(testLogger(t)))
+		WithNodeID("node-1"), WithSyncInterval(0), WithTelemetryInterval(0), WithLogger(testLogger(t)), WithTestRedirectTargets())
 	if err != nil {
 		t.Fatal(err)
 	}

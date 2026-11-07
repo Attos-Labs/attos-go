@@ -74,22 +74,25 @@ var ErrTruncatedDownload = errors.New("attos sync: truncated download")
 // Lookups (Get, GetString, GetCopy, View) are lock-free and allocation-free;
 // see Map for the retirement scheme and the zero-copy validity window.
 type Synchronizer struct {
-	apiKey       string
-	baseURL      string
-	cacheDir     string
-	stashID      string
-	syncInterval time.Duration
-	nodeID       string
-	noGzip       bool             // WithCompression(false): ask for the raw blob
-	noDelta      bool             // WithDelta(false): never ask for a patch
-	noRedirect   bool             // WithRedirect(false): never ask for a signed redirect
-	redirectOff  atomic.Int64     // unix nanos: no redirect requests before this time (after a failed signed download)
-	nowFn        func() time.Time // test clock; nil = time.Now
-	rnd          func() float64   // [0,1); math/rand/v2 unless a test injects one
-	logger       *log.Logger
-	httpClient   *http.Client
-	openConfig   OpenConfig
-	sigKeys      map[string]ed25519.PublicKey // non-empty: signed artifacts are enforced
+	apiKey        string
+	baseURL       string
+	cacheDir      string
+	stashID       string
+	syncInterval  time.Duration
+	nodeID        string
+	noGzip        bool     // WithCompression(false): ask for the raw blob
+	noDelta       bool     // WithDelta(false): never ask for a patch
+	noRedirect    bool     // WithRedirect(false): never ask for a signed redirect
+	redirectHosts []string // WithRedirectHosts
+	redirectAny   bool     // WithTestRedirectTargets
+	policy        *redirectPolicy
+	redirectOff   atomic.Int64     // unix nanos: no redirect requests before this time (after a failed signed download)
+	nowFn         func() time.Time // test clock; nil = time.Now
+	rnd           func() float64   // [0,1); math/rand/v2 unless a test injects one
+	logger        *log.Logger
+	httpClient    *http.Client
+	openConfig    OpenConfig
+	sigKeys       map[string]ed25519.PublicKey // non-empty: signed artifacts are enforced
 
 	telemetryInterval time.Duration
 	telemetryBaseURL  string
@@ -165,6 +168,8 @@ func NewSynchronizer(ctx context.Context, stashID string, opts ...Option) (*Sync
 	for _, opt := range opts {
 		opt(s)
 	}
+	s.policy = newRedirectPolicy(append(parseHostList(os.Getenv(RedirectHostsEnv)), s.redirectHosts...))
+	s.policy.anyTarget = s.redirectAny
 	if len(s.nodeID) == 0 || len(s.nodeID) > 128 {
 		return nil, fmt.Errorf("attos: node ID must be 1-128 characters, got %d", len(s.nodeID))
 	}
@@ -819,6 +824,11 @@ func (s *Synchronizer) syncClient() *http.Client {
 		if req.Response != nil && req.Response.Header.Get(contentLengthHdr) != "" {
 			return http.ErrUseLastResponse
 		}
+		if len(via) > 0 {
+			if err := s.redirectPolicy().allowsOrdinaryRedirect(req.URL, via[0].URL); err != nil {
+				return fmt.Errorf("%w: %v", http.ErrUseLastResponse, err)
+			}
+		}
 		if len(via) > 0 && req.URL.Host != via[0].URL.Host {
 			req.Header.Del("X-API-Key")
 			req.Header.Del("Authorization")
@@ -841,8 +851,11 @@ func (s *Synchronizer) syncClient() *http.Client {
 func (s *Synchronizer) fetchRedirect(ctx context.Context, r302 *http.Response) (*http.Response, error) {
 	loc := r302.Header.Get("Location")
 	u, err := neturl.Parse(loc)
-	if err != nil || u.Host == "" || (u.Scheme != "https" && !(u.Scheme == "http" && strings.HasPrefix(s.baseURL, "http://"))) {
-		return nil, fmt.Errorf("unusable redirect target %q", loc)
+	if err != nil {
+		return nil, fmt.Errorf("unusable redirect target: %v", err)
+	}
+	if err := s.redirectPolicy().check(u); err != nil {
+		return nil, err
 	}
 	declared, err := strconv.ParseInt(r302.Header.Get(contentLengthHdr), 10, 64)
 	if err != nil || declared < 0 {
@@ -892,4 +905,12 @@ func (s *Synchronizer) now() time.Time {
 		return s.nowFn()
 	}
 	return time.Now()
+}
+
+// redirectPolicy is the allowed-host policy (a zero Synchronizer built by hand gets the defaults).
+func (s *Synchronizer) redirectPolicy() *redirectPolicy {
+	if s.policy == nil {
+		return newRedirectPolicy(nil)
+	}
+	return s.policy
 }
