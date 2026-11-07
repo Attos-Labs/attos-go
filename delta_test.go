@@ -116,17 +116,18 @@ type deltaServer struct {
 	deltaRq atomic.Int32
 	fullRq  atomic.Int32
 	sawAcc  atomic.Int32
+	gen     int
 }
 
 func newDeltaServer(t *testing.T, blob []byte) *deltaServer {
 	d := &deltaServer{fakeServer: newFakeServer(t)}
 	d.set(blob, `"1"`)
 	d.srv.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get(deltaAcceptHeader) == "1" {
+		if r.Header.Get(deltaAcceptHeader) != "" {
 			d.sawAcc.Add(1)
 		}
 		p := d.patch.Load()
-		if p != nil && r.Header.Get(deltaAcceptHeader) == "1" && r.Header.Get("If-None-Match") == d.fromTag && d.fromTag != "" {
+		if p != nil && r.Header.Get(deltaAcceptHeader) != "" && r.Header.Get("If-None-Match") == d.fromTag && d.fromTag != "" {
 			d.deltaRq.Add(1)
 			body := *p
 			if d.mutate != nil {
@@ -153,14 +154,19 @@ func newDeltaServer(t *testing.T, blob []byte) *deltaServer {
 	return d
 }
 
-func (d *deltaServer) publish(nw []byte) {
+func (d *deltaServer) publish(nw []byte) { d.publishWith(nw, makePatch) }
+
+// publishWith makes nw the live blob; clients holding the previous one get mk(old, nw).
+func (d *deltaServer) publishWith(nw []byte, mk func(old, nw []byte) []byte) {
 	d.mu.Lock()
 	old := d.blob
 	d.fromTag = d.etag
+	gen := d.gen + 1
+	d.gen = gen
 	d.mu.Unlock()
-	p := makePatch(old, nw)
+	p := mk(old, nw)
 	d.patch.Store(&p)
-	d.set(nw, `"2"`)
+	d.set(nw, fmt.Sprintf(`"%d"`, gen+1))
 }
 
 func syncer(t *testing.T, d *deltaServer, opts ...Option) *Synchronizer {

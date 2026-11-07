@@ -85,6 +85,12 @@ type mapping struct {
 	blockShift uint8 // log2(records per block) when compressed
 	totalKeys  uint64
 
+	// Overflow block (flags bit 2; overflow.go). ovK == 0: none.
+	ovK                            int
+	ovFilter                       []uint64 // open-time reject filter over the overflow hashes (one bit probe; no false negatives)
+	ovMask                         uint64
+	ovHashOff, ovOffOff, ovDataOff int
+
 	size int64 // len(data); immutable, readable without pinning
 
 	retired    atomic.Bool
@@ -208,6 +214,16 @@ func (mp *mapping) entryV2(h uint64, key []byte) ([]byte, error) { return mp.ent
 // entryV2s is entryV2 with an optional scratch buffer (see recordCompressed): with sp set, the
 // returned value of a compressed file aliases *sp and is valid until the caller releases it.
 func (mp *mapping) entryV2s(h uint64, key []byte, sp *[]byte) ([]byte, error) {
+	if mp.ovK != 0 {
+		if v, found, err := mp.overflowLookup(h, key); found {
+			return v, err
+		}
+	}
+	return mp.entryMain(h, key, sp)
+}
+
+// entryMain is the PTHash lookup, ignoring the overflow block.
+func (mp *mapping) entryMain(h uint64, key []byte, sp *[]byte) ([]byte, error) {
 	var e []byte
 	if mp.compressed {
 		var err error
@@ -253,8 +269,12 @@ func (mp *mapping) entryV2s(h uint64, key []byte, sp *[]byte) ([]byte, error) {
 }
 
 func (mp *mapping) countRows() int {
-	if mp.version == 2 {
+	if mp.version == 2 && mp.ovK == 0 {
 		return int(mp.totalKeys)
+	}
+	if mp.version == 2 {
+		mp.rowsOnce.Do(func() { mp.rows = mp.countRowsOverflow() })
+		return mp.rows
 	}
 	mp.rowsOnce.Do(func() {
 		be := binary.BigEndian
@@ -460,7 +480,7 @@ func (m *Map) Scan(fn func(key, value []byte) bool) {
 	mp.nonLookups.Add(1)
 	defer s.exit.Add(1)
 	if mp.version == 2 {
-		mp.scanV2(fn)
+		mp.scanV2Overflow(fn)
 		return
 	}
 	be := binary.BigEndian

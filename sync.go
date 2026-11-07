@@ -392,7 +392,7 @@ func (s *Synchronizer) syncHTTPOnce(ctx context.Context, allowDelta bool) error 
 	if s.etag != "" && s.m.cur.Load() != nil {
 		req.Header.Set("If-None-Match", s.etag)
 		if allowDelta {
-			req.Header.Set(deltaAcceptHeader, "1")
+			req.Header.Set(deltaAcceptHeader, "2") // 2: copy/add and tail (overflow) patches
 		}
 	}
 	resp, err := s.httpClient.Do(req)

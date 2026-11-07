@@ -264,8 +264,8 @@ func parseHeaderV2(data []byte, checkCRC bool) (*mapping, error) {
 	bsz := pthash.PackedSize(t.NB-t.P2, t.BW)
 	free := pthash.FreeSize(t.N, t.M)
 	flags := data[8]
-	if flags&^3 != 0 {
-		return nil, unsupportedFeature(data, fmt.Sprintf("flags %#02x (unknown bits %#02x)", flags, flags&^3), fmt.Sprintf("unsupported v2 flags %#x", flags))
+	if flags&^(3|flagOverflow) != 0 {
+		return nil, unsupportedFeature(data, fmt.Sprintf("flags %#02x (unknown bits %#02x)", flags, flags&^(3|flagOverflow)), fmt.Sprintf("unsupported v2 flags %#x", flags))
 	}
 	var leanW int
 	if flags&2 != 0 {
@@ -318,6 +318,11 @@ func parseHeaderV2(data []byte, checkCRC bool) (*mapping, error) {
 		want := be.Uint32(data[e:])
 		if got := crc32.ChecksumIEEE(data[:e]); got != want {
 			return nil, fmt.Errorf("%w: trailer 0x%08x, computed 0x%08x", ErrChecksumMismatch, want, got)
+		}
+	}
+	if flags&flagOverflow != 0 {
+		if err := mp.parseOverflow(end + last); err != nil {
+			return nil, err
 		}
 	}
 	return mp, nil

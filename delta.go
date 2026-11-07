@@ -23,8 +23,12 @@ import (
 
 const (
 	deltaMagic   = "ATDL"
-	deltaVersion = 1
-	deltaHdrLen  = 60
+	deltaVersion = 1 // copy/add patches
+	// deltaVersionTail patches (ATDL v2) rebuild a file from the unchanged main part of the base plus a new
+	// overflow tail: op 0x01 TRUNCATE_AND_APPEND, u64 BE baseEnd, u64 BE payloadLen, payload.
+	deltaVersionTail   = 2
+	deltaOpTruncAppend = 0x01
+	deltaHdrLen        = 60
 
 	deltaOpEnd  = 0x00
 	deltaOpCopy = 0x01
@@ -69,9 +73,10 @@ func applyDelta(dst io.Writer, base io.ReaderAt, baseSize int64, patch io.Reader
 	if _, err := io.ReadFull(br, hdr[:]); err != nil {
 		return h, fmt.Errorf("%w: header: %v", errDeltaCorrupt, err)
 	}
-	if string(hdr[:4]) != deltaMagic || binary.BigEndian.Uint32(hdr[4:]) != deltaVersion {
+	if string(hdr[:4]) != deltaMagic || (binary.BigEndian.Uint32(hdr[4:]) != deltaVersion && binary.BigEndian.Uint32(hdr[4:]) != deltaVersionTail) {
 		return h, fmt.Errorf("%w: bad magic or version", errDeltaCorrupt)
 	}
+	tailPatch := binary.BigEndian.Uint32(hdr[4:]) == deltaVersionTail
 	h.BaseSize = binary.BigEndian.Uint64(hdr[8:])
 	h.BaseCRC = binary.BigEndian.Uint32(hdr[16:])
 	h.TargetSize = binary.BigEndian.Uint64(hdr[20:])
@@ -95,6 +100,36 @@ func applyDelta(dst io.Writer, base io.ReaderAt, baseSize int64, patch io.Reader
 	buf := make([]byte, 256<<10)
 	for {
 		op, err := br.ReadByte()
+		if err == nil && tailPatch && op == deltaOpTruncAppend {
+			if produced != 0 {
+				return h, fmt.Errorf("%w: second tail op", errDeltaCorrupt)
+			}
+			var ph [16]byte
+			if _, err := io.ReadFull(br, ph[:]); err != nil {
+				return h, fmt.Errorf("%w: tail op: %v", errDeltaCorrupt, err)
+			}
+			baseEnd, plen := binary.BigEndian.Uint64(ph[:]), binary.BigEndian.Uint64(ph[8:])
+			if baseEnd > h.BaseSize-4 || baseEnd < 64 || plen > h.TargetSize || baseEnd != h.TargetSize-plen {
+				return h, fmt.Errorf("%w: tail op bounds", errDeltaCorrupt)
+			}
+			// New file = the base's main part with the overflow flag set + the payload (overflow, footer, CRC).
+			var first [64]byte
+			if _, err := base.ReadAt(first[:], 0); err != nil {
+				return h, fmt.Errorf("%w: reading base header: %v", errDeltaBase, err)
+			}
+			first[8] |= flagOverflow
+			if _, err := out.Write(first[:]); err != nil {
+				return h, err
+			}
+			if m, err := io.CopyBuffer(out, io.NewSectionReader(base, 64, int64(baseEnd)-64), buf); err != nil || uint64(m) != baseEnd-64 {
+				return h, fmt.Errorf("attos: delta copy: %d bytes: %v", m, err)
+			}
+			if m, err := io.CopyBuffer(out, io.LimitReader(br, int64(plen)), buf); err != nil || uint64(m) != plen {
+				return h, fmt.Errorf("%w: truncated tail payload", errDeltaCorrupt)
+			}
+			produced = baseEnd + plen
+			continue
+		}
 		if err != nil {
 			return h, fmt.Errorf("%w: truncated: %v", errDeltaCorrupt, err)
 		}
