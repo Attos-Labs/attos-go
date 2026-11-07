@@ -1,6 +1,6 @@
 package attos
 
-// LSM-lite overflow block (attos-cloud/docs/OVERFLOW_BLOCK.md). A v2 file with flags bit 2 carries a small
+// LSM-lite overflow block. A v2 file with flags bit 2 carries a small
 // sorted side table between the main blob and the CRC trailer. Lookups check it before the PTHash table;
 // the main section of the file is untouched, so a patch only has to rewrite the tail.
 //

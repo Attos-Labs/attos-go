@@ -2,7 +2,7 @@ package attos
 
 // Which hosts a sync redirect may send the SDK to.
 //
-// A signed download (docs/EGRESS_COSTS.md) is a 302 from the sync endpoint to a URL the SDK then fetches without
+// A signed download is a 302 from the sync endpoint to a URL the SDK then fetches without
 // credentials. The SDK does not trust the sync server's choice blindly: the target must be https, carry no
 // userinfo, sit on a default Google Cloud Storage host or on a host the application configured, and the
 // download itself must not redirect again. A target that is refused counts as a failed signed download: the sync

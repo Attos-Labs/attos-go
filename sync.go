@@ -450,7 +450,7 @@ func (s *Synchronizer) syncHTTPOnce(ctx context.Context, allowDelta, allowRedire
 	}
 	defer resp.Body.Close()
 
-	// A signed redirect (docs/EGRESS_COSTS.md): the bytes come from a short-lived URL, fetched WITHOUT any
+	// A signed redirect: the bytes come from a short-lived URL, fetched WITHOUT any
 	// credential header; everything else about the response is read from this 302.
 	redirected := false
 	if resp.StatusCode == http.StatusFound && resp.Header.Get(contentLengthHdr) != "" {

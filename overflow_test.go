@@ -25,7 +25,7 @@ type ovItem struct {
 }
 
 // withOverflow turns a v2 blob (with or without an overflow) into the same main blob plus an overflow
-// block holding items: the layout of attos-cloud/docs/OVERFLOW_BLOCK.md, written independently of the
+// block holding items: the layout of the design notes, written independently of the
 // readers under test.
 func withOverflow(t testing.TB, blob []byte, items []ovItem) []byte {
 	t.Helper()

@@ -1,6 +1,6 @@
 package attos
 
-// Delta sync (docs/DELTA_UPDATES.md in attos-cloud; CONTRACTS.md §4 addendum): a node that is one
+// Delta sync (CONTRACTS.md §4 addendum): a node that is one
 // version behind downloads a patch ("ATDL" v1) instead of the whole blob, rebuilds the new blob into a
 // temp file from its current file and then goes through exactly the same signature check, CRC
 // validation, rename and atomic publish as a full download. The patch format is transport-only; the
