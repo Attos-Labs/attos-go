@@ -178,6 +178,11 @@ func TestRedirectFailuresFallBackToStreaming(t *testing.T) {
 			w.Header().Set("Content-Length", fmt.Sprint(len(body)))
 			w.Write(body[:len(body)/2])
 		},
+		"oversized chunked body": func(w http.ResponseWriter, body []byte) { // no Content-Length: the stream is cut at declared+1
+			w.(http.Flusher).Flush()
+			w.Write(body)
+			w.Write(bytes.Repeat([]byte{1}, 1<<16))
+		},
 		"wrong length": func(w http.ResponseWriter, body []byte) {
 			w.Header().Set("Content-Length", fmt.Sprint(len(body)-1))
 			w.Write(body[:len(body)-1])

@@ -120,3 +120,6 @@ func (s *Synchronizer) RedirectStats() (redirected, fallbacks uint64) {
 func withJitterSource(f func() float64) Option {
 	return func(s *Synchronizer) { s.rnd = f }
 }
+
+// withClock injects the clock used for the redirect cool-down (tests).
+func withClock(f func() time.Time) Option { return func(s *Synchronizer) { s.nowFn = f } }

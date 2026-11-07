@@ -80,10 +80,12 @@ type Synchronizer struct {
 	stashID      string
 	syncInterval time.Duration
 	nodeID       string
-	noGzip       bool           // WithCompression(false): ask for the raw blob
-	noDelta      bool           // WithDelta(false): never ask for a patch
-	noRedirect   bool           // WithRedirect(false): never ask for a signed redirect
-	rnd          func() float64 // [0,1); math/rand/v2 unless a test injects one
+	noGzip       bool             // WithCompression(false): ask for the raw blob
+	noDelta      bool             // WithDelta(false): never ask for a patch
+	noRedirect   bool             // WithRedirect(false): never ask for a signed redirect
+	redirectOff  atomic.Int64     // unix nanos: no redirect requests before this time (after a failed signed download)
+	nowFn        func() time.Time // test clock; nil = time.Now
+	rnd          func() float64   // [0,1); math/rand/v2 unless a test injects one
 	logger       *log.Logger
 	httpClient   *http.Client
 	openConfig   OpenConfig
@@ -373,7 +375,7 @@ func (s *Synchronizer) Sync(ctx context.Context) error {
 }
 
 func (s *Synchronizer) syncHTTP(ctx context.Context) error {
-	allowDelta, allowRedirect := !s.noDelta, !s.noRedirect
+	allowDelta, allowRedirect := !s.noDelta, !s.noRedirect && s.now().UnixNano() >= s.redirectOff.Load()
 	for {
 		err := s.syncHTTPOnce(ctx, allowDelta, allowRedirect)
 		if err == nil || ctx.Err() != nil {
@@ -386,7 +388,10 @@ func (s *Synchronizer) syncHTTP(ctx context.Context) error {
 			// The signed URL failed (expired, HTTP error, truncated or corrupt body): ask the sync endpoint to
 			// stream the bytes itself (X-Attos-No-Redirect). Anything else keeps its normal handling.
 			s.redirectFallbacks.Add(1)
-			s.log("[attos] signed download failed (%v); fetching through the sync endpoint", rf.err)
+			// Stop asking for a while: a node that cannot reach the download host (egress firewall, proxy) would
+			// otherwise be handed a URL, fail, and stream the same bytes on every sync, billed twice each time.
+			s.redirectOff.Store(s.now().Add(RedirectCooldown).UnixNano())
+			s.log("[attos] signed download failed (%v); fetching through the sync endpoint, no redirects for %v", rf.err, RedirectCooldown)
 			allowRedirect = false
 		case errors.As(err, &df) && allowDelta:
 			// Whatever went wrong with the patch, the full blob is the safe path (CONTRACTS.md §4 addendum).
@@ -870,5 +875,21 @@ func (s *Synchronizer) fetchRedirect(ctx context.Context, r302 *http.Response) (
 	if enc := r302.Header.Get(contentEncodingHdr); enc != "" {
 		h.Set("Content-Encoding", enc)
 	}
-	return &http.Response{StatusCode: http.StatusOK, Header: h, Body: resp.Body, ContentLength: declared}, nil
+	// Never read more than one byte past the declared size: an oversized body is rejected as a length mismatch
+	// instead of being written to disk without bound.
+	body := struct {
+		io.Reader
+		io.Closer
+	}{io.LimitReader(resp.Body, declared+1), resp.Body}
+	return &http.Response{StatusCode: http.StatusOK, Header: h, Body: body, ContentLength: declared}, nil
+}
+
+// RedirectCooldown is how long a node stops asking for signed redirects after a signed download failed.
+var RedirectCooldown = time.Hour
+
+func (s *Synchronizer) now() time.Time {
+	if s.nowFn != nil {
+		return s.nowFn()
+	}
+	return time.Now()
 }
