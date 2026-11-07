@@ -170,6 +170,7 @@ func newTestSync(t testing.TB, f *fakeServer, dir string, opts ...Option) *Synch
 	all := append([]Option{
 		WithBaseURL(f.srv.URL), WithCacheDir(dir), WithAPIKey("test-key"),
 		WithSyncInterval(0), WithTelemetryInterval(0), WithLogger(testLogger(t)),
+		withJitterSource(func() float64 { return 0 }), // exact delays; jitter has its own tests
 	}, opts...)
 	s, err := NewSynchronizer(context.Background(), "ds-1", all...)
 	if err != nil {
@@ -330,7 +331,7 @@ func TestSyncContextCancelMidDownload(t *testing.T) {
 }
 
 func TestSyncBackoffPolicy(t *testing.T) {
-	s := &Synchronizer{syncInterval: 30 * time.Second, loggedStatus: map[int]bool{}, logger: testLogger(t)}
+	s := &Synchronizer{syncInterval: 30 * time.Second, loggedStatus: map[int]bool{}, logger: testLogger(t), rnd: func() float64 { return 0 }}
 	if d := s.nextDelay(&StatusError{Code: 402}); d != QuotaPause {
 		t.Fatalf("402 -> %v", d)
 	}
@@ -385,6 +386,7 @@ func TestSyncPollLoopRecovers(t *testing.T) {
 	}
 	s, err := NewSynchronizer(context.Background(), "ds-1", WithBaseURL(f.srv.URL), WithCacheDir(dir),
 		WithAPIKey("k"), WithSyncInterval(time.Second), WithTelemetryInterval(0), WithLogger(testLogger(t)),
+		withJitterSource(func() float64 { return 0 }),
 		func(s *Synchronizer) { s.sleep = fast })
 	if err != nil {
 		t.Fatal(err)

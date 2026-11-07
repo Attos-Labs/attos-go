@@ -102,3 +102,21 @@ func WithDelta(on bool) Option {
 func (s *Synchronizer) DeltaStats() (applied, fallbacks, patchBytes uint64) {
 	return s.deltaApplied.Load(), s.deltaFallbacks.Load(), s.deltaPatchBytes.Load()
 }
+
+// WithRedirect controls signed redirects (default on). When on, the sync endpoint may answer with a 302 to a
+// short-lived signed URL, which the SDK downloads without sending any credential; every failure of that
+// download is repeated through the sync endpoint. WithRedirect(false) always streams through the endpoint.
+func WithRedirect(on bool) Option {
+	return func(s *Synchronizer) { s.noRedirect = !on }
+}
+
+// RedirectStats reports how many syncs were completed from a signed URL and how many signed downloads failed
+// and fell back to the sync endpoint.
+func (s *Synchronizer) RedirectStats() (redirected, fallbacks uint64) {
+	return s.redirected.Load(), s.redirectFallbacks.Load()
+}
+
+// withJitterSource injects the random source used for poll and back-off jitter (tests).
+func withJitterSource(f func() float64) Option {
+	return func(s *Synchronizer) { s.rnd = f }
+}

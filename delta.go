@@ -38,7 +38,10 @@ const (
 // Delta request/response headers (opt-in; servers that do not know them ignore the request header).
 const (
 	deltaAcceptHeader  = "X-Attos-Accept-Delta"
-	capabilitiesHeader = "X-Attos-Capabilities" // "overflow": the SDK can read overflow-flagged v2 files
+	noRedirectHeader   = "X-Attos-No-Redirect"      // request: stream the bytes yourself (fallback after a failed signed download)
+	contentLengthHdr   = "X-Attos-Content-Length"   // 302: size of the object behind the URL
+	contentEncodingHdr = "X-Attos-Content-Encoding" // 302: content coding of the object behind the URL
+	capabilitiesHeader = "X-Attos-Capabilities"     // "overflow": the SDK can read overflow-flagged v2 files
 	deltaHeader        = "X-Attos-Delta"
 	deltaBaseHeader    = "X-Attos-Delta-Base-ETag"
 	deltaSHAHeader     = "X-Attos-Delta-Target-SHA256"

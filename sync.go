@@ -12,6 +12,7 @@ import (
 	"log"
 	"math/rand/v2"
 	"net/http"
+	neturl "net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -79,8 +80,10 @@ type Synchronizer struct {
 	stashID      string
 	syncInterval time.Duration
 	nodeID       string
-	noGzip       bool // WithCompression(false): ask for the raw blob
-	noDelta      bool // WithDelta(false): never ask for a patch
+	noGzip       bool           // WithCompression(false): ask for the raw blob
+	noDelta      bool           // WithDelta(false): never ask for a patch
+	noRedirect   bool           // WithRedirect(false): never ask for a signed redirect
+	rnd          func() float64 // [0,1); math/rand/v2 unless a test injects one
 	logger       *log.Logger
 	httpClient   *http.Client
 	openConfig   OpenConfig
@@ -109,6 +112,9 @@ type Synchronizer struct {
 	deltaApplied    atomic.Uint64 // syncs completed from a patch
 	deltaFallbacks  atomic.Uint64 // patches that failed and were replaced by a full download
 	deltaPatchBytes atomic.Uint64 // patch bytes downloaded
+
+	redirected        atomic.Uint64 // syncs whose bytes came from a signed URL
+	redirectFallbacks atomic.Uint64 // signed-URL fetches that failed and were repeated through the sync endpoint
 
 	ctx      context.Context
 	cancel   context.CancelFunc
@@ -279,7 +285,7 @@ func (s *Synchronizer) poll(initialErr error) {
 func (s *Synchronizer) nextDelay(err error) time.Duration {
 	if err == nil {
 		s.failures = 0
-		return s.syncInterval
+		return s.jitterInterval()
 	}
 	var se *StatusError
 	if errors.As(err, &se) {
@@ -288,7 +294,8 @@ func (s *Synchronizer) nextDelay(err error) time.Duration {
 			if se.RetryAfter > 0 {
 				d = min(se.RetryAfter, MaxRetryAfter)
 			}
-			s.log("[attos] WARNING: quota/node limit (%d). Sync paused for %v. Serving local reads.", se.Code, d)
+			d += time.Duration(s.random() * 0.2 * float64(d)) // resume at spread-out moments, never earlier than asked
+			s.log("[attos] WARNING: quota/node limit (%d). Sync paused for %v. Serving local reads.", se.Code, d.Round(time.Second))
 			return d
 		}
 		if se.Code >= 400 && se.Code < 500 {
@@ -297,11 +304,11 @@ func (s *Synchronizer) nextDelay(err error) time.Duration {
 				s.log("[attos] sync rejected (%v); keeping current data, retrying every %v", se, s.syncInterval)
 			}
 			s.failures = 0
-			return s.syncInterval
+			return s.jitterInterval()
 		}
 	}
 	// Transient (5xx, network, truncated body, validation failure).
-	d := transientBackoff(s.failures, s.syncInterval)
+	d := transientBackoffJ(s.failures, s.syncInterval, s.random())
 	s.failures++
 	s.log("[attos] sync failed (%v); keeping current data, retrying in %v", err, d.Round(time.Millisecond))
 	return d
@@ -309,6 +316,11 @@ func (s *Synchronizer) nextDelay(err error) time.Duration {
 
 // transientBackoff is 1 s × 2^k with ±20% jitter, capped at min(interval, 5 min).
 func transientBackoff(k int, interval time.Duration) time.Duration {
+	return transientBackoffJ(k, interval, rand.Float64())
+}
+
+// transientBackoffJ is transientBackoff with the jitter draw (in [0,1)) supplied by the caller.
+func transientBackoffJ(k int, interval time.Duration, r float64) time.Duration {
 	limit := maxTransientBackoff
 	if interval > 0 && interval < limit {
 		limit = interval
@@ -320,7 +332,7 @@ func transientBackoff(k int, interval time.Duration) time.Duration {
 	if d > limit {
 		d = limit
 	}
-	jitter := 0.8 + 0.4*rand.Float64()
+	jitter := 0.8 + 0.4*r
 	return time.Duration(float64(d) * jitter)
 }
 
@@ -361,18 +373,33 @@ func (s *Synchronizer) Sync(ctx context.Context) error {
 }
 
 func (s *Synchronizer) syncHTTP(ctx context.Context) error {
-	err := s.syncHTTPOnce(ctx, !s.noDelta)
-	var df *deltaFailure
-	if errors.As(err, &df) && ctx.Err() == nil {
-		// Whatever went wrong with the patch, the full blob is the safe path (CONTRACTS.md §4 addendum).
-		s.deltaFallbacks.Add(1)
-		s.log("[attos] delta update failed (%v); downloading the full blob", df.err)
-		return s.syncHTTPOnce(ctx, false)
+	allowDelta, allowRedirect := !s.noDelta, !s.noRedirect
+	for {
+		err := s.syncHTTPOnce(ctx, allowDelta, allowRedirect)
+		if err == nil || ctx.Err() != nil {
+			return err
+		}
+		var df *deltaFailure
+		var rf *redirectFailure
+		switch {
+		case errors.As(err, &rf) && allowRedirect:
+			// The signed URL failed (expired, HTTP error, truncated or corrupt body): ask the sync endpoint to
+			// stream the bytes itself (X-Attos-No-Redirect). Anything else keeps its normal handling.
+			s.redirectFallbacks.Add(1)
+			s.log("[attos] signed download failed (%v); fetching through the sync endpoint", rf.err)
+			allowRedirect = false
+		case errors.As(err, &df) && allowDelta:
+			// Whatever went wrong with the patch, the full blob is the safe path (CONTRACTS.md §4 addendum).
+			s.deltaFallbacks.Add(1)
+			s.log("[attos] delta update failed (%v); downloading the full blob", df.err)
+			allowDelta = false
+		default:
+			return err
+		}
 	}
-	return err
 }
 
-func (s *Synchronizer) syncHTTPOnce(ctx context.Context, allowDelta bool) error {
+func (s *Synchronizer) syncHTTPOnce(ctx context.Context, allowDelta, allowRedirect bool) error {
 	url := fmt.Sprintf("%s/api/v1/datasets/sync/%s", s.baseURL, s.stashID)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
@@ -392,17 +419,47 @@ func (s *Synchronizer) syncHTTPOnce(ctx context.Context, allowDelta bool) error 
 	if s.etag != "" && s.m.cur.Load() != nil {
 		req.Header.Set("If-None-Match", s.etag)
 	}
+	// Capabilities are sent on every request, a first sync included, so a fresh node can be given the
+	// overflow-capable file that later tail patches build on. Delta 2: copy/add and tail (overflow) patches.
+	var caps []string
 	if allowDelta {
-		// Capabilities are sent on every request, a first sync included, so a fresh node can be given the
-		// overflow-capable file that later tail patches build on. 2: copy/add and tail (overflow) patches.
 		req.Header.Set(deltaAcceptHeader, "2")
-		req.Header.Set(capabilitiesHeader, "overflow")
+		caps = append(caps, "overflow")
 	}
-	resp, err := s.httpClient.Do(req)
+	if allowRedirect {
+		caps = append(caps, "redirect")
+	} else if !s.noRedirect {
+		req.Header.Set(noRedirectHeader, "1") // fallback after a failed signed download: stream it
+	}
+	if len(caps) > 0 {
+		req.Header.Set(capabilitiesHeader, strings.Join(caps, ","))
+	}
+	resp, err := s.syncClient().Do(req)
 	if err != nil {
 		return fmt.Errorf("sync request: %w", err)
 	}
 	defer resp.Body.Close()
+
+	// A signed redirect (docs/EGRESS_COSTS.md): the bytes come from a short-lived URL, fetched WITHOUT any
+	// credential header; everything else about the response is read from this 302.
+	redirected := false
+	if resp.StatusCode == http.StatusFound && resp.Header.Get(contentLengthHdr) != "" {
+		eff, rerr := s.fetchRedirect(ctx, resp)
+		if rerr != nil {
+			if ctx.Err() != nil {
+				return rerr
+			}
+			return &redirectFailure{rerr}
+		}
+		defer eff.Body.Close()
+		resp, redirected = eff, true
+	}
+	fail := func(err error) error { // a failure while handling redirected bytes is a redirect failure
+		if redirected && err != nil && ctx.Err() == nil {
+			return &redirectFailure{err}
+		}
+		return err
+	}
 
 	switch {
 	case resp.StatusCode == http.StatusNotModified:
@@ -425,9 +482,15 @@ func (s *Synchronizer) syncHTTPOnce(ctx context.Context, allowDelta bool) error 
 			if ctx.Err() != nil {
 				return err
 			}
+			if redirected {
+				return &redirectFailure{err}
+			}
 			return &deltaFailure{err}
 		}
 		s.deltaApplied.Add(1)
+		if redirected {
+			s.redirected.Add(1)
+		}
 		s.finishSync(resp)
 		return nil
 	}
@@ -444,19 +507,22 @@ func (s *Synchronizer) syncHTTPOnce(ctx context.Context, allowDelta bool) error 
 		zr, err := gzip.NewReader(resp.Body)
 		if err != nil {
 			if errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, io.EOF) {
-				return fmt.Errorf("%w: %v", ErrTruncatedDownload, err)
+				return fail(fmt.Errorf("%w: %v", ErrTruncatedDownload, err))
 			}
-			return fmt.Errorf("download blob: %w", err)
+			return fail(fmt.Errorf("download blob: %w", err))
 		}
 		defer zr.Close()
 		body, contentLength = zr, -1
 	default:
-		return fmt.Errorf("download blob: unsupported Content-Encoding %q", enc)
+		return fail(fmt.Errorf("download blob: unsupported Content-Encoding %q", enc))
 	}
 	err = s.installFrom(body, contentLength)
 	s.pendingSig = ""
 	if err != nil {
-		return err
+		return fail(err)
+	}
+	if redirected {
+		s.redirected.Add(1)
 	}
 	s.finishSync(resp)
 	return nil
@@ -712,3 +778,97 @@ func (s *Synchronizer) Close() error {
 type countWriter uint64
 
 func (c *countWriter) Write(p []byte) (int, error) { *c += countWriter(len(p)); return len(p), nil }
+
+// random returns a draw in [0,1); tests inject a fixed source.
+func (s *Synchronizer) random() float64 {
+	if s.rnd != nil {
+		return s.rnd()
+	}
+	return rand.Float64()
+}
+
+// jitterInterval is the wait between polls: the base interval plus a random share of up to half of it
+// ("30 s + up to 15 s"). It keeps a fleet that reconnects together (a deploy, a network blip) from polling in
+// lockstep. An interval of 0 (polling off) stays 0.
+func (s *Synchronizer) jitterInterval() time.Duration {
+	d := s.syncInterval
+	if d <= 0 {
+		return d
+	}
+	return d + time.Duration(s.random()*float64(d/2))
+}
+
+// redirectFailure marks a failed signed-URL download; the caller repeats the sync through the endpoint.
+type redirectFailure struct{ err error }
+
+func (r *redirectFailure) Error() string { return "signed download failed: " + r.err.Error() }
+func (r *redirectFailure) Unwrap() error { return r.err }
+
+// syncClient is s.httpClient with redirects handled here: a redirect the sync endpoint marks as a signed
+// download (X-Attos-Content-Length on the 302) is returned to the caller, which fetches the URL itself without
+// credentials. Any other redirect is followed as before, but never forwards the API key or node ID to another host.
+func (s *Synchronizer) syncClient() *http.Client {
+	c := *s.httpClient
+	prev := c.CheckRedirect
+	c.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		if req.Response != nil && req.Response.Header.Get(contentLengthHdr) != "" {
+			return http.ErrUseLastResponse
+		}
+		if len(via) > 0 && req.URL.Host != via[0].URL.Host {
+			req.Header.Del("X-API-Key")
+			req.Header.Del("Authorization")
+			req.Header.Del("X-Attos-Node-ID")
+		}
+		if prev != nil {
+			return prev(req, via)
+		}
+		if len(via) >= 10 {
+			return errors.New("stopped after 10 redirects")
+		}
+		return nil
+	}
+	return &c
+}
+
+// fetchRedirect downloads the object behind a signed redirect. The request is built from scratch: it carries
+// no X-API-Key, Authorization or node ID, only what a plain download needs. The returned response is shaped like
+// the 200 the sync endpoint would have streamed (headers of the 302, the declared content coding and length).
+func (s *Synchronizer) fetchRedirect(ctx context.Context, r302 *http.Response) (*http.Response, error) {
+	loc := r302.Header.Get("Location")
+	u, err := neturl.Parse(loc)
+	if err != nil || u.Host == "" || (u.Scheme != "https" && !(u.Scheme == "http" && strings.HasPrefix(s.baseURL, "http://"))) {
+		return nil, fmt.Errorf("unusable redirect target %q", loc)
+	}
+	declared, err := strconv.ParseInt(r302.Header.Get(contentLengthHdr), 10, 64)
+	if err != nil || declared < 0 {
+		return nil, fmt.Errorf("invalid %s", contentLengthHdr)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("User-Agent", "attos-go/"+Version)
+	req.Header.Set("Accept-Encoding", "gzip") // explicit: net/http must not decode on its own
+	c := *s.httpClient
+	c.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	resp, err := c.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("signed download: %w", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		io.Copy(io.Discard, io.LimitReader(resp.Body, 512))
+		resp.Body.Close()
+		return nil, fmt.Errorf("signed download: HTTP %d", resp.StatusCode)
+	}
+	if resp.ContentLength >= 0 && resp.ContentLength != declared {
+		resp.Body.Close()
+		return nil, fmt.Errorf("signed download: %d bytes, expected %d", resp.ContentLength, declared)
+	}
+	h := r302.Header.Clone()
+	h.Del("Location")
+	h.Del("Content-Encoding")
+	if enc := r302.Header.Get(contentEncodingHdr); enc != "" {
+		h.Set("Content-Encoding", enc)
+	}
+	return &http.Response{StatusCode: http.StatusOK, Header: h, Body: resp.Body, ContentLength: declared}, nil
+}
