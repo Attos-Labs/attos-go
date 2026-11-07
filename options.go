@@ -89,3 +89,16 @@ func WithTelemetryAPIKey(key string) Option {
 func WithTelemetryDisabled() Option {
 	return func(s *Synchronizer) { s.telemetryOff = true }
 }
+
+// WithDelta controls delta updates (default on). When on, a node that is one version behind asks the
+// server for a binary patch instead of the whole blob; the rebuilt blob is validated exactly like a
+// download, and any failure falls back to the full blob. WithDelta(false) always downloads the full blob.
+func WithDelta(on bool) Option {
+	return func(s *Synchronizer) { s.noDelta = !on }
+}
+
+// DeltaStats reports how many syncs were completed from a patch, how many patches failed and fell back
+// to a full download, and how many patch bytes were downloaded.
+func (s *Synchronizer) DeltaStats() (applied, fallbacks, patchBytes uint64) {
+	return s.deltaApplied.Load(), s.deltaFallbacks.Load(), s.deltaPatchBytes.Load()
+}

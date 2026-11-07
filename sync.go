@@ -15,6 +15,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -79,6 +80,7 @@ type Synchronizer struct {
 	syncInterval time.Duration
 	nodeID       string
 	noGzip       bool // WithCompression(false): ask for the raw blob
+	noDelta      bool // WithDelta(false): never ask for a patch
 	logger       *log.Logger
 	httpClient   *http.Client
 	openConfig   OpenConfig
@@ -103,6 +105,10 @@ type Synchronizer struct {
 	sigErrors  atomic.Uint64 // downloaded or cached files rejected by signature verification
 	syncOK     atomic.Uint64
 	syncFailed atomic.Uint64
+
+	deltaApplied    atomic.Uint64 // syncs completed from a patch
+	deltaFallbacks  atomic.Uint64 // patches that failed and were replaced by a full download
+	deltaPatchBytes atomic.Uint64 // patch bytes downloaded
 
 	ctx      context.Context
 	cancel   context.CancelFunc
@@ -355,6 +361,18 @@ func (s *Synchronizer) Sync(ctx context.Context) error {
 }
 
 func (s *Synchronizer) syncHTTP(ctx context.Context) error {
+	err := s.syncHTTPOnce(ctx, !s.noDelta)
+	var df *deltaFailure
+	if errors.As(err, &df) && ctx.Err() == nil {
+		// Whatever went wrong with the patch, the full blob is the safe path (CONTRACTS.md §4 addendum).
+		s.deltaFallbacks.Add(1)
+		s.log("[attos] delta update failed (%v); downloading the full blob", df.err)
+		return s.syncHTTPOnce(ctx, false)
+	}
+	return err
+}
+
+func (s *Synchronizer) syncHTTPOnce(ctx context.Context, allowDelta bool) error {
 	url := fmt.Sprintf("%s/api/v1/datasets/sync/%s", s.baseURL, s.stashID)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
@@ -373,6 +391,9 @@ func (s *Synchronizer) syncHTTP(ctx context.Context) error {
 	}
 	if s.etag != "" && s.m.cur.Load() != nil {
 		req.Header.Set("If-None-Match", s.etag)
+		if allowDelta {
+			req.Header.Set(deltaAcceptHeader, "1")
+		}
 	}
 	resp, err := s.httpClient.Do(req)
 	if err != nil {
@@ -393,6 +414,20 @@ func (s *Synchronizer) syncHTTP(ctx context.Context) error {
 	}
 
 	s.pendingSig = resp.Header.Get(SignatureHeader)
+
+	if resp.Header.Get(deltaHeader) == "1" {
+		err := s.installDelta(resp)
+		s.pendingSig = ""
+		if err != nil {
+			if ctx.Err() != nil {
+				return err
+			}
+			return &deltaFailure{err}
+		}
+		s.deltaApplied.Add(1)
+		s.finishSync(resp)
+		return nil
+	}
 
 	body, contentLength := io.Reader(resp.Body), resp.ContentLength
 	switch enc := resp.Header.Get("Content-Encoding"); enc {
@@ -420,13 +455,62 @@ func (s *Synchronizer) syncHTTP(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	s.finishSync(resp)
+	return nil
+}
+
+// finishSync records the ETag, config and name of a response whose body was installed.
+func (s *Synchronizer) finishSync(resp *http.Response) {
 	s.etag = resp.Header.Get("ETag")
 	s.persistETag()
 	s.applyConfigHeader(resp.Header.Get("X-Attos-Config"))
 	if name := resp.Header.Get("X-Dataset-Name"); name != "" {
 		s.stashName.Store(&name)
 	}
-	return nil
+}
+
+// installDelta rebuilds the new blob from the live file and the patch in resp.Body and installs it through
+// installFrom, so the signature check, CRC validation, rename and atomic publish are the ones a full
+// download goes through. The patch's target SHA-256 must also match the server's header.
+func (s *Synchronizer) installDelta(resp *http.Response) error {
+	if enc := resp.Header.Get("Content-Encoding"); enc != "" && enc != "identity" {
+		return fmt.Errorf("unsupported Content-Encoding %q on a patch", enc)
+	}
+	have := s.etag
+	if strings.HasSuffix(have, `-gzip"`) { // the raw tag of the same version
+		have = strings.TrimSuffix(have, `-gzip"`) + `"`
+	}
+	if base := resp.Header.Get(deltaBaseHeader); base != have {
+		return fmt.Errorf("patch is for base %s, this node has %s", base, have)
+	}
+	base, err := os.Open(s.livePath())
+	if err != nil {
+		return fmt.Errorf("open current file: %w", err)
+	}
+	defer base.Close()
+	fi, err := base.Stat()
+	if err != nil {
+		return err
+	}
+	wantSHA := resp.Header.Get(deltaSHAHeader)
+	var patchBytes countWriter
+	pr, pw := io.Pipe()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		hdr, err := applyDelta(pw, base, fi.Size(), io.TeeReader(resp.Body, &patchBytes))
+		if err == nil && wantSHA != "" && fmt.Sprintf("%x", hdr.TargetSHA) != wantSHA {
+			err = fmt.Errorf("%w: target SHA-256 differs from the server's header", errDeltaCorrupt)
+		}
+		pw.CloseWithError(err) // nil → io.EOF for the reader
+	}()
+	err = s.installFrom(pr, -1)
+	pr.CloseWithError(io.ErrClosedPipe) // unblock the applier if installFrom stopped early
+	<-done
+	if err == nil {
+		s.deltaPatchBytes.Add(uint64(patchBytes))
+	}
+	return err
 }
 
 func (s *Synchronizer) applyConfigHeader(h string) {
@@ -621,3 +705,7 @@ func (s *Synchronizer) Close() error {
 	})
 	return s.closeErr
 }
+
+type countWriter uint64
+
+func (c *countWriter) Write(p []byte) (int, error) { *c += countWriter(len(p)); return len(p), nil }
