@@ -37,7 +37,7 @@ func TestUnsupportedFeaturesFailClosed(t *testing.T) {
 		feature string
 		mutate  func(b []byte)
 	}{
-		{"unknown flag bit", "flags", func(b []byte) { b[8] |= 0x04 }},
+		{"unknown flag bit", "flags", func(b []byte) { b[8] |= 0x08 }}, // 0x04 is the overflow flag since this release
 		{"offset width 6", "offset width 6", func(b []byte) { b[52] = 6 }},
 		{"fingerprint width 16", "fingerprint width 16", func(b []byte) { b[8] |= 2; b[53] = 16 }},
 	}

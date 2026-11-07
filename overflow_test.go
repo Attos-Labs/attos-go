@@ -372,49 +372,61 @@ func TestOverflowGrowsUnderConcurrentReads(t *testing.T) {
 	t.Logf("%d reads across 3 overflow generations, 0 bad", reads.Load())
 }
 
-// Cross-SDK conformance on the fixtures written by the cloud compiler (testdata/golden/MANIFEST.md): the
-// SHA-256s pin the exact bytes all three SDKs must read identically.
-func TestOverflowGolden(t *testing.T) {
-	dir := os.Getenv("GOLDEN_DIR")
-	if dir == "" {
-		dir = "../testdata/golden"
-	}
-	if _, err := os.Stat(filepath.Join(dir, "overflow_v2_base.attos")); err != nil {
-		t.Skip("overflow golden fixtures not found (set GOLDEN_DIR)")
-	}
+// Cross-SDK conformance on the shared test vectors written by the cloud compiler (testdata/overflow;
+// testdata/golden/MANIFEST.md in the workspace). The SHA-256s pin the exact bytes every SDK must handle.
+func TestOverflowVectors(t *testing.T) {
 	read := func(name, sha string) []byte {
-		b, err := os.ReadFile(filepath.Join(dir, name))
+		b, err := os.ReadFile(filepath.Join("testdata", "overflow", name))
 		if err != nil {
-			t.Skipf("%s: %v", name, err)
+			t.Fatal(err)
 		}
 		if s := sha256.Sum256(b); fmt.Sprintf("%x", s) != sha {
 			t.Fatalf("%s changed: %x", name, s)
 		}
 		return b
 	}
-	base := read("overflow_v2_base.attos", "aeced07c6b1385cbaa1dcbdabf66bb346040de0ee769377c17eb6e4e54dabf84")
-	gen1 := read("overflow_v2_gen1.attos", "cf576f5dc6b67d075f3878945c1460a848a30ca3a55241cc1e850785c1f0bbad")
-	patch := read("overflow_v2_gen1.tailpatch", "35a70422f414bbca42aa9a556e803893f0d51030f4609d7ac885cf5647c8d26b")
+	base := read("v1_base.attos", "ea20042415281fa1101e6fea5187e26abf40c6742b65c502efdbe4fa4aceb720")
+	patch := read("v1_to_v2_tail.patch", "9f5aa0bae8d4c2b6b7de68f502605aebfa62fd4bee10394f1c5ab71812f500a2")
+	exp := read("v2_expected.attos", "3f1d70c6fe07303e162d50266ceb2c6d292df1c54227016114520bef216164ab")
 
-	m := openBlob(t, gen1)
-	want := map[string]string{"key_0": "val_0", "key_5": "overwritten", "inserted_a": "A", "inserted_b": "B", "key_499": "val_499"}
-	for k, v := range want {
-		if got, err := m.GetCopy([]byte(k), nil); err != nil || string(got) != v {
-			t.Fatalf("%s = %q, %v; want %q", k, got, err, v)
+	if got, err := apply(base, patch); err != nil || !bytes.Equal(got, exp) {
+		t.Fatalf("applying the tail patch to the base must give v2_expected byte for byte: %v", err)
+	}
+	if mb := openBlob(t, base); mb.Len() != 1000 {
+		t.Fatalf("base Len %d", mb.Len())
+	}
+	m := openBlob(t, exp)
+	if m.Len() != 1048 {
+		t.Fatalf("Len %d, want 1048", m.Len())
+	}
+	get := func(k string) (string, error) { v, err := m.GetCopy([]byte(k), nil); return string(v), err }
+	for i := 0; i < 50; i++ {
+		if v, err := get(fmt.Sprintf("ins_%d", i)); err != nil || v != fmt.Sprintf("inserted_%d", i) {
+			t.Fatalf("ins_%d = %q, %v", i, v, err)
 		}
 	}
-	for _, k := range []string{"key_7", "key_8", "nope"} {
-		if _, err := m.Get([]byte(k)); !errors.Is(err, ErrKeyNotFound) {
+	for _, i := range []int{10, 20, 30, 40, 50} {
+		if v, err := get(fmt.Sprintf("key_%d", i)); err != nil || v != fmt.Sprintf("overwritten_%d", i) {
+			t.Fatalf("key_%d = %q, %v", i, v, err)
+		}
+	}
+	for _, k := range []string{"key_100", "key_200", "nope"} {
+		if _, err := get(k); !errors.Is(err, ErrKeyNotFound) {
 			t.Fatalf("%s must be absent: %v", k, err)
 		}
 	}
-	if m.Len() != 500 { // 500 + 2 inserted - 2 deleted
-		t.Fatalf("Len %d", m.Len())
+	changed := map[int]bool{10: true, 20: true, 30: true, 40: true, 50: true, 100: true, 200: true}
+	for i := 0; i < 1000; i++ {
+		if changed[i] {
+			continue
+		}
+		if v, err := get(fmt.Sprintf("key_%d", i)); err != nil || v != fmt.Sprintf("val_%d", i) {
+			t.Fatalf("key_%d = %q, %v", i, v, err)
+		}
 	}
-	if got, err := apply(base, patch); err != nil || !bytes.Equal(got, gen1) {
-		t.Fatalf("the compiler's tail patch does not rebuild gen1 in the SDK applier: %v", err)
-	}
-	if m := openBlob(t, base); m.Len() != 500 {
-		t.Fatal("base map")
+	n := 0
+	m.Scan(func(k, v []byte) bool { n++; return true })
+	if n != 1048 {
+		t.Fatalf("Scan saw %d", n)
 	}
 }

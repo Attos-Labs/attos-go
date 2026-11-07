@@ -391,9 +391,12 @@ func (s *Synchronizer) syncHTTPOnce(ctx context.Context, allowDelta bool) error 
 	}
 	if s.etag != "" && s.m.cur.Load() != nil {
 		req.Header.Set("If-None-Match", s.etag)
-		if allowDelta {
-			req.Header.Set(deltaAcceptHeader, "2") // 2: copy/add and tail (overflow) patches
-		}
+	}
+	if allowDelta {
+		// Capabilities are sent on every request, a first sync included, so a fresh node can be given the
+		// overflow-capable file that later tail patches build on. 2: copy/add and tail (overflow) patches.
+		req.Header.Set(deltaAcceptHeader, "2")
+		req.Header.Set(capabilitiesHeader, "overflow")
 	}
 	resp, err := s.httpClient.Do(req)
 	if err != nil {

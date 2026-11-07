@@ -37,10 +37,11 @@ const (
 
 // Delta request/response headers (opt-in; servers that do not know them ignore the request header).
 const (
-	deltaAcceptHeader = "X-Attos-Accept-Delta"
-	deltaHeader       = "X-Attos-Delta"
-	deltaBaseHeader   = "X-Attos-Delta-Base-ETag"
-	deltaSHAHeader    = "X-Attos-Delta-Target-SHA256"
+	deltaAcceptHeader  = "X-Attos-Accept-Delta"
+	capabilitiesHeader = "X-Attos-Capabilities" // "overflow": the SDK can read overflow-flagged v2 files
+	deltaHeader        = "X-Attos-Delta"
+	deltaBaseHeader    = "X-Attos-Delta-Base-ETag"
+	deltaSHAHeader     = "X-Attos-Delta-Target-SHA256"
 )
 
 var (
