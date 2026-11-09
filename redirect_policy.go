@@ -20,8 +20,9 @@ import (
 // exact host ("dl.example.com") or a subdomain wildcard ("*.example.com", which does not match "example.com").
 const RedirectHostsEnv = "ATTOS_REDIRECT_HOSTS"
 
-// defaultRedirectHosts are the Google Cloud Storage endpoints: path-style and virtual-hosted style.
-var defaultRedirectHosts = []string{"storage.googleapis.com", "*.storage.googleapis.com"}
+// defaultRedirectHosts are the Google Cloud Storage endpoints (path-style and virtual-hosted style) and the Attos
+// download CDN hostname (a Cloudflare Worker in front of the same private bucket; downloads carry a short-lived token).
+var defaultRedirectHosts = []string{"storage.googleapis.com", "*.storage.googleapis.com", "dl.attoscloud.com"}
 
 type redirectPolicy struct {
 	hosts []string // lower-case exact hosts and "*.suffix" wildcards
