@@ -83,6 +83,7 @@ type Synchronizer struct {
 	noGzip        bool     // WithCompression(false): ask for the raw blob
 	noDelta       bool     // WithDelta(false): never ask for a patch
 	noRedirect    bool     // WithRedirect(false): never ask for a signed redirect
+	noWarmUp      bool     // WithWarmUp(false): do not pre-fault newly mapped files (default: pre-fault)
 	redirectHosts []string // WithRedirectHosts
 	redirectAny   bool     // WithTestRedirectTargets
 	policy        *redirectPolicy
@@ -168,6 +169,7 @@ func NewSynchronizer(ctx context.Context, stashID string, opts ...Option) (*Sync
 	for _, opt := range opts {
 		opt(s)
 	}
+	s.applyWarmUpDefault()
 	s.policy = newRedirectPolicy(append(parseHostList(os.Getenv(RedirectHostsEnv)), s.redirectHosts...))
 	s.policy.anyTarget = s.redirectAny
 	if len(s.nodeID) == 0 || len(s.nodeID) > 128 {

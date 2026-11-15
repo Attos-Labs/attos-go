@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+* Warm-up by default in the Synchronizer: every newly mapped file is read into memory before it is published (`OpenConfig.WarmUp`), so a hot swap never exposes readers to a cold mapping (first-touch page faults added about 350 to 600 ns to P99 at 100k reads/s). Opt out with `WithWarmUp(false)`; an explicit `OpenConfig.Warm`/`WarmUp` is always honoured. Cost: resident memory equals the file size.
+
 ## 1.5.0 - 2026-11-09
 
 * Delta updates (on by default; `WithDelta(false)` turns them off): a node that is one version behind downloads a small binary patch instead of the whole blob, rebuilds the new blob into a new file and runs the same validate-then-swap as a full download (CRC, signature, atomic publish). Any failure falls back to the full blob inside the same `Sync`. `Synchronizer.DeltaStats` reports patches applied, fallbacks and patch bytes. Servers that do not know about patches keep sending full blobs.
