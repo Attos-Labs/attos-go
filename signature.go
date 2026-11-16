@@ -19,8 +19,8 @@ import (
 //
 //	X-Attos-Signature: alg=ed25519; kid=<key id>; sig=<base64 of 64 bytes>
 //
-// The signed message is "attos-artifact-v1\x00" + stashID + "\x00" + SHA-256(file),
-// which binds the signature to one stash, so a valid file for another stash is
+// The signed message is "attos-artifact-v1\x00" + datasetID + "\x00" + SHA-256(file),
+// which binds the signature to one dataset, so a valid file for another dataset is
 // rejected. Configure trusted public keys with WithSignatureKeys; from then on
 // the SDK refuses any downloaded or cached file without a valid signature
 // (fail closed), keeps serving the file it has, and counts the failure.
@@ -57,23 +57,23 @@ func ParsePublicKey(b64 string) (ed25519.PublicKey, error) {
 	return nil, errors.New("attos: public key must be 32 bytes, base64 encoded")
 }
 
-func signedMessage(stashID string, digest []byte) []byte {
-	m := make([]byte, 0, 18+len(stashID)+1+len(digest))
+func signedMessage(datasetID string, digest []byte) []byte {
+	m := make([]byte, 0, 18+len(datasetID)+1+len(digest))
 	m = append(m, "attos-artifact-v1\x00"...)
-	m = append(m, stashID...)
+	m = append(m, datasetID...)
 	m = append(m, 0)
 	return append(m, digest...)
 }
 
 // SignArtifact signs a file digest the way the control plane does (for tests and tooling).
-func SignArtifact(priv ed25519.PrivateKey, kid, stashID string, digest []byte) string {
-	sig := ed25519.Sign(priv, signedMessage(stashID, digest))
+func SignArtifact(priv ed25519.PrivateKey, kid, datasetID string, digest []byte) string {
+	sig := ed25519.Sign(priv, signedMessage(datasetID, digest))
 	return fmt.Sprintf("alg=ed25519; kid=%s; sig=%s", kid, base64.StdEncoding.EncodeToString(sig))
 }
 
 func (s *Synchronizer) signingEnforced() bool { return len(s.sigKeys) > 0 }
 
-// verifySignature checks header against digest for this stash.
+// verifySignature checks header against digest for this dataset.
 func (s *Synchronizer) verifySignature(header string, digest []byte) error {
 	if header == "" {
 		return ErrSignatureMissing
@@ -104,7 +104,7 @@ func (s *Synchronizer) verifySignature(header string, digest []byte) error {
 	if err != nil || len(raw) != ed25519.SignatureSize {
 		return fmt.Errorf("%w: malformed signature", ErrSignatureInvalid)
 	}
-	if !ed25519.Verify(pub, signedMessage(s.stashID, digest), raw) {
+	if !ed25519.Verify(pub, signedMessage(s.datasetID, digest), raw) {
 		return fmt.Errorf("%w: does not match the file", ErrSignatureInvalid)
 	}
 	return nil
