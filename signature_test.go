@@ -59,8 +59,8 @@ func TestSignedArtifacts(t *testing.T) {
 	_ = otherPub
 	srv := newSigningServer(t)
 	srv.blob.Store(readBlob(t, kvBlob(t, 50)))
-	sign := func(priv ed25519.PrivateKey, kid, stash string) *func([]byte) string {
-		f := func(d []byte) string { return SignArtifact(priv, kid, stash, d) }
+	sign := func(priv ed25519.PrivateKey, kid, dataset string) *func([]byte) string {
+		f := func(d []byte) string { return SignArtifact(priv, kid, dataset, d) }
 		return &f
 	}
 	open := func(dir string, keys map[string]ed25519.PublicKey) (*Synchronizer, error) {
@@ -88,7 +88,7 @@ func TestSignedArtifacts(t *testing.T) {
 		"missing signature": nil,
 		"wrong key":         sign(otherPriv, "k1", "ds-1"),
 		"unknown key id":    sign(priv, "nope", "ds-1"),
-		"other stash":       sign(priv, "k1", "ds-2"),
+		"other dataset":     sign(priv, "k1", "ds-2"),
 	}
 	for name, fn := range reject {
 		t.Run("rejects "+name, func(t *testing.T) {

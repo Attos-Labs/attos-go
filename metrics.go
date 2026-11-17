@@ -41,7 +41,7 @@ func promMetric(w io.Writer, name, kind, help string, v any) {
 // counters the SDK keeps anyway, so scraping adds nothing to the lookup path.
 func (m *Map) WritePrometheus(w io.Writer) { m.writeProm(w, "", "") }
 
-func (m *Map) writeProm(w io.Writer, etag, stash string) {
+func (m *Map) writeProm(w io.Writer, etag, dataset string) {
 	lookups := m.Lookups()
 	misses := min(m.Misses(), lookups)
 	promMetric(w, "attos_lookups_total", "counter", "Lookups served.", lookups)
@@ -54,8 +54,8 @@ func (m *Map) writeProm(w io.Writer, etag, stash string) {
 	promMetric(w, "attos_hot_swaps_total", "counter", "Completed hot swaps of the live file.", m.Swaps())
 	promMetric(w, "attos_file_bytes", "gauge", "Size of the file in use.", m.Size())
 	promMetric(w, "attos_file_keys", "gauge", "Slots in the file in use.", m.Slots())
-	fmt.Fprintf(w, "# HELP attos_file_info Version of the file in use (format version, ETag, stash).\n# TYPE attos_file_info gauge\nattos_file_info{format_version=\"%d\",etag=\"%s\",stash=\"%s\"} 1\n",
-		m.FormatVersion(), promEscape(etag), promEscape(stash))
+	fmt.Fprintf(w, "# HELP attos_file_info Version of the file in use (format version, ETag, dataset).\n# TYPE attos_file_info gauge\nattos_file_info{format_version=\"%d\",etag=\"%s\",dataset=\"%s\"} 1\n",
+		m.FormatVersion(), promEscape(etag), promEscape(dataset))
 	fmt.Fprint(w, "# HELP attos_lookup_duration_seconds Lookup latency, sampled 1 in 256 lookups.\n# TYPE attos_lookup_duration_seconds histogram\n")
 	var acc uint64
 	var sumNs float64
@@ -69,10 +69,10 @@ func (m *Map) writeProm(w io.Writer, etag, stash string) {
 	fmt.Fprintf(w, "attos_lookup_duration_seconds_bucket{le=\"+Inf\"} %d\nattos_lookup_duration_seconds_sum %g\nattos_lookup_duration_seconds_count %d\n", acc, sumNs/1e9, acc)
 }
 
-// WritePrometheus writes the map metrics plus sync state: the ETag and stash
+// WritePrometheus writes the map metrics plus sync state: the ETag and dataset
 // of the file in use, CRC failures, sync outcomes and telemetry delivery.
 func (s *Synchronizer) WritePrometheus(w io.Writer) {
-	s.m.writeProm(w, s.ETag(), s.StashName())
+	s.m.writeProm(w, s.ETag(), s.DatasetName())
 	promMetric(w, "attos_crc_errors_total", "counter", "Downloaded blobs rejected by the CRC32 check.", s.crcErrors.Load())
 	promMetric(w, "attos_signature_errors_total", "counter", "Files rejected because their signature was missing or invalid.", s.sigErrors.Load())
 	promMetric(w, "attos_sync_ok_total", "counter", "Sync attempts that succeeded (including not-modified).", s.syncOK.Load())

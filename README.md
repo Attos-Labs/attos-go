@@ -105,7 +105,7 @@ val, err := m.GetString("user_123")
 
 ## Cloud sync options
 
-Pass these to `attos.NewSynchronizer(ctx, stashID, opts...)`:
+Pass these to `attos.NewSynchronizer(ctx, datasetID, opts...)`:
 
 | Option | Description |
 | :--- | :--- |
@@ -137,7 +137,7 @@ name, err := sc.String(value, "name")
 
 ## Metrics
 
-`http.Handle("/metrics", attos.MetricsHandler(sync))` serves Prometheus text: lookups, misses and hit ratio, a sampled lookup-latency histogram (1 in 256 lookups), hot swaps, CRC and sync errors, and `attos_file_info{format_version,etag,stash}` for the file in use. Scraping reads counters the SDK keeps anyway; lookups stay allocation-free.
+`http.Handle("/metrics", attos.MetricsHandler(sync))` serves Prometheus text: lookups, misses and hit ratio, a sampled lookup-latency histogram (1 in 256 lookups), hot swaps, CRC and sync errors, and `attos_file_info{format_version,etag,dataset}` for the file in use. Scraping reads counters the SDK keeps anyway; lookups stay allocation-free.
 
 ## Sizing against Redis: `attos-size`
 
@@ -153,10 +153,10 @@ It samples up to 200,000 rows (`-sample`), builds real Attos files from the samp
 
 ```go
 pub, _ := attos.ParsePublicKey("<base64 Ed25519 public key>")
-s, err := attos.NewSynchronizer(ctx, stashID, attos.WithSignatureKeys(map[string]ed25519.PublicKey{"2026-10": pub}))
+s, err := attos.NewSynchronizer(ctx, datasetID, attos.WithSignatureKeys(map[string]ed25519.PublicKey{"2026-10": pub}))
 ```
 
-With keys set, the synchronizer installs a file only if its `X-Attos-Signature` header verifies (Ed25519 over the file's SHA-256, bound to the stash id), and re-verifies the cached copy on restart. A missing or invalid signature is refused (`ErrSignatureMissing`, `ErrSignatureInvalid`), the current file keeps serving, and `attos_signature_errors_total` counts it. The file format is unchanged, and deltas are not requested while signing is enforced because they are unsigned. The signed message is `"attos-artifact-v1\0" + stash_id + "\0" + SHA-256(file)`, and the header is `alg=ed25519; kid=<id>; sig=<base64>`. The control plane must sign the files for this to work; do not enable enforcement until it does.
+With keys set, the synchronizer installs a file only if its `X-Attos-Signature` header verifies (Ed25519 over the file's SHA-256, bound to the dataset id), and re-verifies the cached copy on restart. A missing or invalid signature is refused (`ErrSignatureMissing`, `ErrSignatureInvalid`), the current file keeps serving, and `attos_signature_errors_total` counts it. The file format is unchanged, and deltas are not requested while signing is enforced because they are unsigned. The signed message is `"attos-artifact-v1\0" + dataset_id + "\0" + SHA-256(file)`, and the header is `alg=ed25519; kid=<id>; sig=<base64>`. The control plane must sign the files for this to work; do not enable enforcement until it does.
 
 ## Errors
 

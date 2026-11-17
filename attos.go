@@ -75,7 +75,7 @@ type OpenConfig struct {
 	LocalObjectStore bool
 
 	// LocalS3Bucket is the name of the customer's S3 bucket to pull from
-	// when LocalObjectStore is true. The object key is "<stashID>.attos".
+	// when LocalObjectStore is true. The object key is "<datasetID>.attos".
 	LocalS3Bucket string
 }
 

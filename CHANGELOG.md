@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+* Rename stash back to dataset in the public API: `Synchronizer.DatasetName()` is the name again and `StashName()` (added in 1.4.0) stays as a deprecated alias that returns the same value; the `NewSynchronizer` parameter is called `datasetID` (positional, so no source change). Prometheus metrics and docs say dataset. The wire protocol is unchanged.
 * Warm-up by default in the Synchronizer: every newly mapped file is read into memory before it is published (`OpenConfig.WarmUp`), so a hot swap never exposes readers to a cold mapping (first-touch page faults added about 350 to 600 ns to P99 at 100k reads/s). Opt out with `WithWarmUp(false)`; an explicit `OpenConfig.Warm`/`WarmUp` is always honoured. Cost: resident memory equals the file size.
 
 ## 1.5.0 - 2026-11-09
