@@ -118,6 +118,16 @@ Pass these to `attos.NewSynchronizer(ctx, datasetID, opts...)`:
 | `WithLogger(*log.Logger)` | Logger for sync and telemetry messages. |
 | `WithTelemetryDisabled()` | Turn the telemetry emitter off. |
 | `WithOpenConfig(attos.OpenConfig)` | Checksum validation and memory pinning for the mapped blob. |
+| `WithHTTPClient(*http.Client)` | HTTP client used for sync and telemetry. |
+| `WithTelemetryInterval(time.Duration)` | Telemetry report interval. Default 60s; `0` disables the emitter. |
+| `WithTelemetryBaseURL(string)`, `WithTelemetryAPIKey(string)` | Send telemetry to a different endpoint or with a different key. |
+| `WithDelta(bool)` | Request and apply delta patches. Default `true`. See `Synchronizer.DeltaStats`. |
+| `WithRedirect(bool)` | Accept signed-download redirects. Default `true`. See `Synchronizer.RedirectStats`. |
+| `WithRedirectHosts(...string)` | Extra hosts a signed download may come from, on top of `storage.googleapis.com` and `*.storage.googleapis.com`. `ATTOS_REDIRECT_HOSTS` (comma separated) is added. Exact hosts or `*.domain`; https on port 443 only. |
+| `WithSignatureKeys(map[string]ed25519.PublicKey)` | Enforce Ed25519 artifact signatures (see Signed artifacts). |
+| `WithWarmUp(bool)` | Read each newly mapped file into memory before it is published. Default `true`; costs resident memory equal to the file size. Listed as unreleased in the changelog. |
+
+Polling waits the interval plus a random share of up to half of it (30 to 45 s at the default). After a redirect download fails, redirects stay off for `attos.RedirectCooldown` (a package variable, default one hour).
 
 ## Batch lookups and typed values
 
@@ -162,6 +172,10 @@ With keys set, the synchronizer installs a file only if its `X-Attos-Signature` 
 
 - `attos.ErrKeyNotFound`: the key is not in the current dataset.
 - `attos.ErrInvalidMagic`, `attos.ErrCorruptedBinary`, `attos.ErrChecksumMismatch`: the blob failed validation.
+- `attos.ErrUnsupportedFeature` (also `*attos.FeatureError`) and `attos.ErrInvalidVersion`: the file needs a newer SDK.
+- `attos.ErrSignatureMissing`, `attos.ErrSignatureInvalid`: signing is enforced and the file failed verification.
+- `attos.ErrTruncatedDownload`: the download ended early; the next poll retries.
+- `attos.ErrMapClosed`, `attos.ErrNoMap`: the map was closed, or no blob is loaded yet.
 - `*attos.StatusError`: the cloud returned a non-200 status. `Quota()` is true for plan limits (402/429); the SDK keeps serving the last good blob.
 
 ## Format compatibility
