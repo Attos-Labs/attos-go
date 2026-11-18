@@ -76,6 +76,15 @@ func (mp *mapping) parseOverflow(baseEnd uint64) error {
 		return fmt.Errorf("%w: overflow data length mismatch", ErrCorruptedBinary)
 	}
 	mp.ovK, mp.ovHashOff, mp.ovOffOff, mp.ovDataOff = int(k), int(hashOff), int(offOff), int(dataOff)
+	// Every record must parse (u16 keyLen | u32 valLen | key | value, tombstones without a value) so that lookups, Len
+	// and Scan never meet a malformed entry (OVERFLOW_BLOCK.md: "valLen bounds"). The same is checked at open by the
+	// Rust, Java, Node and Python readers.
+	for i := 0; i < int(k); i++ {
+		if _, _, _, ok := mp.ovEntry(i); !ok {
+			mp.ovK = 0
+			return fmt.Errorf("%w: invalid overflow entry %d", ErrCorruptedBinary, i)
+		}
+	}
 	// Reject filter: 32 bits per key rounded up to a power of two, one probe per lookup. It is built here, once
 	// per mapping (a few KB), so most lookups of main-table keys cost one cache line instead of a binary search.
 	bits := uint64(64)

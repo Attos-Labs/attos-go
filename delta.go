@@ -161,6 +161,10 @@ func applyDelta(dst io.Writer, base io.ReaderAt, baseSize int64, patch io.Reader
 			}
 			return h, nil
 		case deltaOpCopy, deltaOpAdd:
+			if tailPatch {
+				// A v2 (tail) patch is one TRUNCATE_AND_APPEND op plus END; the v1 copy/add ops are not part of it.
+				return h, fmt.Errorf("%w: unknown op %#x", errDeltaCorrupt, op)
+			}
 			var off uint64
 			if op == deltaOpCopy {
 				if off, err = binary.ReadUvarint(br); err != nil {
