@@ -7,7 +7,7 @@ package attos
 // userinfo, sit on a default Google Cloud Storage host or on a host the application configured, and the
 // download itself must not redirect again. A target that is refused counts as a failed signed download: the sync
 // is repeated once through the endpoint (X-Attos-No-Redirect: 1) and the node stops asking for redirects for
-// RedirectCooldown, so it is neither fetched from an unexpected host nor re-billed on every poll.
+// redirectCooldown, so it is neither fetched from an unexpected host nor re-billed on every poll.
 
 import (
 	"fmt"

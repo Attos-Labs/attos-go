@@ -78,13 +78,12 @@ func newRedirectEnvTLS(t *testing.T, blob []byte, useTLS bool) *redirectEnv {
 		}
 		wantsRedirect := strings.Contains(r.Header.Get(capabilitiesHeader), "redirect") && r.Header.Get(noRedirectHeader) != "1"
 		body, isPatch := blob, false
-		if patch != nil && r.Header.Get(deltaAcceptHeader) != "" && r.Header.Get("If-None-Match") == from {
+		if patch != nil && strings.Contains(r.Header.Get(capabilitiesHeader), "patch") && r.Header.Get("If-None-Match") == from {
 			body, isPatch = patch, true
 		}
 		if isPatch {
 			sum := sha256.Sum256(blob)
 			w.Header().Set(deltaHeader, "1")
-			w.Header().Set(deltaBaseHeader, from)
 			w.Header().Set(deltaSHAHeader, hex.EncodeToString(sum[:]))
 		}
 		served := body
@@ -143,7 +142,7 @@ func (e *redirectEnv) publish(blob []byte, patchFrom []byte) {
 	defer e.mu.Unlock()
 	e.fromTag = e.etag
 	if patchFrom != nil {
-		e.patch = makePatch(patchFrom, blob)
+		e.patch = makeTailPatch(patchFrom, blob)
 	}
 	e.blob = blob
 	e.etag = fmt.Sprintf(`"%d"`, len(e.apiReqs)+2)
@@ -299,10 +298,11 @@ func TestOrdinaryRedirectDoesNotForwardCredentials(t *testing.T) {
 }
 
 func TestRedirectedPatchAndFallback(t *testing.T) {
-	a, b := buildBlob(t, "a", 400), buildBlob(t, "b", 400)
+	a := chainBase(t, 400)
+	b := chainVariant(t, a, "b", 50)
 	e := newRedirectEnv(t, a)
 	s := e.sync(t)
-	wantValue(t, s, "key_7", "a_7")
+	wantValue(t, s, "key_7", "val_7")
 	e.publish(b, a)
 	e.mu.Lock()
 	e.mu.Unlock()
@@ -319,8 +319,8 @@ func TestRedirectedPatchAndFallback(t *testing.T) {
 
 	// a corrupted redirected patch: streaming is tried next, and it also gets the patch (the server prefers it
 	// for this client); that patch is intact, so the sync completes
-	c := buildBlob(t, "c", 400)
-	e.publish(c, b)
+	c := chainVariant(t, a, "c", 50)
+	e.publish(c, a)
 	e.storeMod = func(w http.ResponseWriter, body []byte) {
 		x := append([]byte(nil), body...)
 		x[len(x)/2] ^= 1

@@ -99,9 +99,10 @@ func WithTelemetryDisabled() Option {
 	return func(s *Synchronizer) { s.telemetryOff = true }
 }
 
-// WithDelta controls delta updates (default on). When on, a node that is one version behind asks the
-// server for a binary patch instead of the whole blob; the rebuilt blob is validated exactly like a
-// download, and any failure falls back to the full blob. WithDelta(false) always downloads the full blob.
+// WithDelta controls patch updates (default on). When on, the node sends X-Attos-Capabilities: patch, and a node
+// that holds the main blob of the server's overflow chain, or any variant of it, downloads one small tail patch
+// instead of the whole file. The patch is verified (CRC, target SHA-256) and any failure falls back to the full
+// file. WithDelta(false) always downloads the whole file.
 func WithDelta(on bool) Option {
 	return func(s *Synchronizer) { s.noDelta = !on }
 }

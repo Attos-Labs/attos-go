@@ -397,8 +397,8 @@ func (s *Synchronizer) syncHTTP(ctx context.Context) error {
 			s.redirectFallbacks.Add(1)
 			// Stop asking for a while: a node that cannot reach the download host (egress firewall, proxy) would
 			// otherwise be handed a URL, fail, and stream the same bytes on every sync, billed twice each time.
-			s.redirectOff.Store(s.now().Add(RedirectCooldown).UnixNano())
-			s.log("[attos] signed download failed (%v); fetching through the sync endpoint, no redirects for %v", rf.err, RedirectCooldown)
+			s.redirectOff.Store(s.now().Add(redirectCooldown).UnixNano())
+			s.log("[attos] signed download failed (%v); fetching through the sync endpoint, no redirects for %v", rf.err, redirectCooldown)
 			allowRedirect = false
 		case errors.As(err, &df) && allowDelta:
 			// Whatever went wrong with the patch, the full blob is the safe path (CONTRACTS.md §4 addendum).
@@ -432,11 +432,10 @@ func (s *Synchronizer) syncHTTPOnce(ctx context.Context, allowDelta, allowRedire
 		req.Header.Set("If-None-Match", s.etag)
 	}
 	// Capabilities are sent on every request, a first sync included, so a fresh node can be given the
-	// overflow-capable file that later tail patches build on. Delta 2: copy/add and tail (overflow) patches.
+	// overflow-capable file that later tail patches build on.
 	var caps []string
 	if allowDelta {
-		req.Header.Set(deltaAcceptHeader, "2")
-		caps = append(caps, "overflow")
+		caps = append(caps, "patch")
 	}
 	if allowRedirect {
 		caps = append(caps, "redirect")
@@ -556,13 +555,6 @@ func (s *Synchronizer) finishSync(resp *http.Response) {
 func (s *Synchronizer) installDelta(resp *http.Response) error {
 	if enc := resp.Header.Get("Content-Encoding"); enc != "" && enc != "identity" {
 		return fmt.Errorf("unsupported Content-Encoding %q on a patch", enc)
-	}
-	have := s.etag
-	if strings.HasSuffix(have, `-gzip"`) { // the raw tag of the same version
-		have = strings.TrimSuffix(have, `-gzip"`) + `"`
-	}
-	if base := resp.Header.Get(deltaBaseHeader); base != have {
-		return fmt.Errorf("patch is for base %s, this node has %s", base, have)
 	}
 	base, err := os.Open(s.livePath())
 	if err != nil {
@@ -899,8 +891,8 @@ func (s *Synchronizer) fetchRedirect(ctx context.Context, r302 *http.Response) (
 	return &http.Response{StatusCode: http.StatusOK, Header: h, Body: body, ContentLength: declared}, nil
 }
 
-// RedirectCooldown is how long a node stops asking for signed redirects after a signed download failed.
-var RedirectCooldown = time.Hour
+// redirectCooldown is how long a node stops asking for signed redirects after a signed download failed.
+const redirectCooldown = time.Hour
 
 func (s *Synchronizer) now() time.Time {
 	if s.nowFn != nil {
