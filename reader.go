@@ -469,7 +469,7 @@ func (m *Map) View(key []byte, fn func(value []byte)) error {
 	return nil
 }
 
-// Scan iterates over all entries in slot order (arbitrary, MPHF-defined).
+// Scan iterates over all entries in slot order (arbitrary, index-defined).
 // The mapping is pinned for the whole scan; key and value slices are valid
 // only during the callback. Return false to stop early.
 func (m *Map) Scan(fn func(key, value []byte) bool) {

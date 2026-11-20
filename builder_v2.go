@@ -54,7 +54,7 @@ func (b *Builder) Compile(outPath string) error {
 	return b.CompileWithOptions(outPath, CompileOptions{})
 }
 
-// CompileWithOptions writes a version 2 (.attos) file: a PTHash minimal perfect hash, an offset table
+// CompileWithOptions writes a version 2 (.attos) file: a compact key index, an offset table
 // and the key-prefixed records stored in slot order, optionally in LZ4 blocks. See FORMAT_V2.md.
 func (b *Builder) CompileWithOptions(outPath string, opts CompileOptions) error {
 	shift := uint8(0)
