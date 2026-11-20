@@ -1,5 +1,4 @@
-// Package pthash implements the minimal perfect hash used by the .attos v2 format
-// (PTHash, Pibiri & Trani 2021, "dual compact" pilot encoding).
+// Package pthash implements the key index used by the .attos v2 format.
 //
 // The same algorithm, constants and bit layout are implemented by the Java and Rust SDKs
 // and by the cloud compiler (attos-cloud/engine/pthash). Any change here is a format change.

@@ -166,4 +166,4 @@ With keys set, the synchronizer installs a file only if its `X-Attos-Signature` 
 
 ## Format compatibility
 
-This SDK reads `.attos` format versions 1 and 2 (PTHash, LZ4 blocks, 40-bit offsets, lean keys) from the first release that contains them, and fails closed with an error that names the unsupported feature and says to upgrade the SDK when it meets a newer file. The full table of format features against SDK versions is in [docs/FORMAT_COMPATIBILITY.md](https://github.com/Attos-Labs/attos-cloud/blob/main/docs/FORMAT_COMPATIBILITY.md).
+This SDK reads `.attos` format versions 1 and 2 (v2 index, LZ4 blocks, 40-bit offsets, lean keys) from the first release that contains them, and fails closed with an error that names the unsupported feature and says to upgrade the SDK when it meets a newer file. The full table of format features against SDK versions is in [docs/FORMAT_COMPATIBILITY.md](https://github.com/Attos-Labs/attos-cloud/blob/main/docs/FORMAT_COMPATIBILITY.md).
