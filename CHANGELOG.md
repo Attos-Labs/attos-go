@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+* Patch updates simplified: the copy/add patch (ATDL v1) is gone; the overflow tail patch (ATDL v2) is the only patch type. It is negotiated by `X-Attos-Capabilities: patch` (replacing `overflow` and `X-Attos-Accept-Delta`, which are no longer sent), and it applies to any file that starts with the chain's main blob, so a node several versions behind takes the same one patch as a node one behind. The patch header's base size and CRC are no longer checked; the target SHA-256 proves the rebuild. `WithDelta(false)` still turns it off.
+* The redirect cooldown is fixed at one hour; the exported `RedirectCooldown` variable is removed.
 * Overflow records are validated when a file is opened (not at the first lookup that meets one), and a v2 (tail) patch refuses the v1 copy/add ops: both match the other four SDKs and the spec (OVERFLOW_BLOCK.md, OVERFLOW_SHIPPED.md). A file that opened is guaranteed to hold only well-formed records.
 
 * Rename stash back to dataset in the public API: `Synchronizer.DatasetName()` is the name again and `StashName()` (added in 1.4.0) stays as a deprecated alias that returns the same value; the `NewSynchronizer` parameter is called `datasetID` (positional, so no source change). Prometheus metrics and docs say dataset. The wire protocol is unchanged.

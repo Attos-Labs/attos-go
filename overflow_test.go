@@ -347,7 +347,7 @@ func TestOverflowGrowsUnderConcurrentReads(t *testing.T) {
 		}
 		cp := append([]ovItem(nil), items...)
 		nw := withOverflow(t, base, cp)
-		d.publishWith(nw, makeTailPatch)
+		d.publish(nw)
 		if err := s.Sync(context.Background()); err != nil {
 			t.Fatal(err)
 		}

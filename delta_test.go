@@ -10,51 +10,23 @@ import (
 	"fmt"
 	"hash/crc32"
 	"net/http"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 )
 
-// makePatch is a test-only encoder: common prefix and suffix are COPYs, the middle is one ADD. It is
-// independent of the server's diff, so these tests check the wire format, not a shared implementation.
-func makePatch(old, nw []byte) []byte {
-	pre := 0
-	for pre < len(old)-4 && pre < len(nw)-4 && old[pre] == nw[pre] {
-		pre++
+// chainBase is a v2 file whose key_i value is val_i; chainVariant(base, tag, n) is the same main blob with an overflow
+// that sets key_0..key_n-1 to tag_i (a variant of the chain).
+func chainBase(t testing.TB, n int) []byte { return buildMode(t, n, CompileOptions{}) }
+
+func chainVariant(t testing.TB, base []byte, tag string, n int) []byte {
+	var items []ovItem
+	for i := 0; i < n; i++ {
+		items = append(items, ovItem{key: []byte(fmt.Sprintf("key_%d", i)), val: []byte(fmt.Sprintf("%s_%d", tag, i))})
 	}
-	suf := 0
-	for suf < len(old)-pre && suf < len(nw)-pre && old[len(old)-1-suf] == nw[len(nw)-1-suf] {
-		suf++
-	}
-	var b bytes.Buffer
-	b.WriteString("ATDL")
-	var u [binary.MaxVarintLen64]byte
-	binary.Write(&b, binary.BigEndian, uint32(1))
-	binary.Write(&b, binary.BigEndian, uint64(len(old)))
-	b.Write(old[len(old)-4:])
-	binary.Write(&b, binary.BigEndian, uint64(len(nw)))
-	sum := sha256.Sum256(nw)
-	b.Write(sum[:])
-	uv := func(v uint64) { b.Write(u[:binary.PutUvarint(u[:], v)]) }
-	if pre > 0 {
-		b.WriteByte(1)
-		uv(0)
-		uv(uint64(pre))
-	}
-	if mid := nw[pre : len(nw)-suf]; len(mid) > 0 {
-		b.WriteByte(2)
-		uv(uint64(len(mid)))
-		b.Write(mid)
-	}
-	if suf > 0 {
-		b.WriteByte(1)
-		uv(uint64(len(old) - suf))
-		uv(uint64(suf))
-	}
-	b.WriteByte(0)
-	binary.Write(&b, binary.BigEndian, crc32.ChecksumIEEE(b.Bytes()))
-	return b.Bytes()
+	return withOverflow(t, base, items)
 }
 
 func apply(old, patch []byte) ([]byte, error) {
@@ -63,71 +35,66 @@ func apply(old, patch []byte) ([]byte, error) {
 	return out.Bytes(), err
 }
 
-// The same golden patch is pinned in attos-cloud/backend/internal/delta (TestGoldenPatch).
-func TestDeltaGoldenPatch(t *testing.T) {
-	const patchHex = "4154444c000000010000000000000190e2ad7cbb000000000000019b2f513f00e060e0ef3cbcf14e1c0a846d49b7e118a6585039aacde5f8e0321e240100c801020b68656c6c6f2064656c746101c801c80100d172ddf2"
-	patch, _ := hex.DecodeString(patchHex)
-	sum := sha256.Sum256(patch)
-	if got := hex.EncodeToString(sum[:]); got != "76a3e6585d9f95f9381eece4c1650f8b9d0faa187c52253ece0d6a1020e22e61" {
-		t.Fatalf("golden patch bytes changed: %s", got)
-	}
-	old := make([]byte, 400)
-	for i := range old {
-		old[i] = byte(i*7 + i/13)
-	}
-	crc := crc32.ChecksumIEEE(old[:396])
-	binary.BigEndian.PutUint32(old[396:], crc)
-	want := append(append(append([]byte(nil), old[:200]...), "hello delta"...), old[200:]...)
-	got, err := apply(old, patch)
-	if err != nil || !bytes.Equal(got, want) {
-		t.Fatalf("golden patch did not rebuild the target: %v", err)
-	}
-}
-
 func TestApplyDeltaRejectsDamage(t *testing.T) {
-	old, nw := buildBlob(t, "a", 300), buildBlob(t, "b", 300)
-	p := makePatch(old, nw)
-	if got, err := apply(old, p); err != nil || !bytes.Equal(got, nw) {
+	base := chainBase(t, 300)
+	nw := chainVariant(t, base, "b", 20)
+	p := makeTailPatch(base, nw)
+	if got, err := apply(base, p); err != nil || !bytes.Equal(got, nw) {
 		t.Fatalf("valid patch: %v", err)
 	}
 	for i := 0; i < len(p); i += 5 {
 		c := append([]byte(nil), p...)
 		c[i] ^= 0x20
-		if _, err := apply(old, c); err == nil {
+		if _, err := apply(base, c); err == nil {
 			t.Fatalf("byte flip at %d accepted", i)
 		}
 	}
 	for _, n := range []int{0, 30, len(p) / 2, len(p) - 1} {
-		if _, err := apply(old, p[:n]); err == nil {
+		if _, err := apply(base, p[:n]); err == nil {
 			t.Fatalf("truncation to %d accepted", n)
 		}
 	}
-	if _, err := apply(buildBlob(t, "c", 300), p); !errors.Is(err, errDeltaBase) {
-		t.Fatalf("wrong base: %v", err)
+	// A different main blob rebuilds a file whose SHA-256 is not the patch's: refused.
+	if _, err := apply(buildMode(t, 305, CompileOptions{}), p); !errors.Is(err, errDeltaCorrupt) {
+		t.Fatalf("unrelated base: %v", err)
 	}
+	// Any file of the chain is a base: the previous variant takes the same patch.
+	prev := chainVariant(t, base, "a", 5)
+	if got, err := apply(prev, p); err != nil || !bytes.Equal(got, nw) {
+		t.Fatalf("patch on a previous variant: %v", err)
+	}
+	// Version 1 (copy/add) patches no longer exist.
+	v1 := append([]byte(nil), p...)
+	binary.BigEndian.PutUint32(v1[4:], 1)
+	if _, err := apply(base, v1); err == nil {
+		t.Fatal("a version 1 patch was accepted")
+	}
+	_ = crc32.ChecksumIEEE
 }
 
-// deltaServer serves full blobs, and patches to clients that hold fromTag and ask for them.
+// deltaServer serves full blobs, and the tail patch to clients that send the patch capability and hold one of okTags.
 type deltaServer struct {
 	*fakeServer
 	patch   atomic.Pointer[[]byte]
-	fromTag string
+	okTags  map[string]bool
 	mutate  func(w http.ResponseWriter, body []byte) []byte // damages a patch response; nil = intact
 	deltaRq atomic.Int32
 	fullRq  atomic.Int32
 	sawAcc  atomic.Int32
 	gen     int
+	main    []byte
 }
 
 func newDeltaServer(t *testing.T, blob []byte) *deltaServer {
-	d := &deltaServer{fakeServer: newFakeServer(t)}
+	d := &deltaServer{fakeServer: newFakeServer(t), okTags: map[string]bool{`"1"`: true}, main: blob}
 	d.set(blob, `"1"`)
 	d.srv.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get(deltaAcceptHeader) != "" {
+		wantsPatch := strings.Contains(r.Header.Get(capabilitiesHeader), "patch")
+		if wantsPatch {
 			d.sawAcc.Add(1)
 		}
 		p := d.patch.Load()
-		if p != nil && r.Header.Get(deltaAcceptHeader) != "" && r.Header.Get("If-None-Match") == d.fromTag && d.fromTag != "" {
+		if p != nil && wantsPatch && d.okTags[r.Header.Get("If-None-Match")] {
 			d.deltaRq.Add(1)
 			body := *p
 			if d.mutate != nil {
@@ -139,7 +106,6 @@ func newDeltaServer(t *testing.T, blob []byte) *deltaServer {
 			d.mu.Unlock()
 			sum := sha256.Sum256(target)
 			w.Header().Set(deltaHeader, "1")
-			w.Header().Set(deltaBaseHeader, d.fromTag)
 			w.Header().Set(deltaSHAHeader, hex.EncodeToString(sum[:]))
 			w.Header().Set("ETag", etag)
 			w.Header().Set("X-Attos-Config", `{"telemetry_enabled":true}`)
@@ -154,17 +120,15 @@ func newDeltaServer(t *testing.T, blob []byte) *deltaServer {
 	return d
 }
 
-func (d *deltaServer) publish(nw []byte) { d.publishWith(nw, makePatch) }
-
-// publishWith makes nw the live blob; clients holding the previous one get mk(old, nw).
-func (d *deltaServer) publishWith(nw []byte, mk func(old, nw []byte) []byte) {
+// publish makes nw (a variant of the chain's main blob) the live file. Every earlier tag of the chain gets the one
+// patch built from the main blob, however many versions behind it is.
+func (d *deltaServer) publish(nw []byte) {
 	d.mu.Lock()
-	old := d.blob
-	d.fromTag = d.etag
+	d.okTags[d.etag] = true
 	gen := d.gen + 1
 	d.gen = gen
 	d.mu.Unlock()
-	p := mk(old, nw)
+	p := makeTailPatch(d.main, nw)
 	d.patch.Store(&p)
 	d.set(nw, fmt.Sprintf(`"%d"`, gen+1))
 }
@@ -183,10 +147,11 @@ func wantValue(t *testing.T, s *Synchronizer, key, want string) {
 }
 
 func TestDeltaSyncAppliesPatch(t *testing.T) {
-	d := newDeltaServer(t, buildBlob(t, "a", 500))
+	base := chainBase(t, 500)
+	d := newDeltaServer(t, base)
 	s := syncer(t, d)
-	wantValue(t, s, "key_7", "a_7")
-	d.publish(buildBlob(t, "b", 500))
+	wantValue(t, s, "key_7", "val_7")
+	d.publish(chainVariant(t, base, "b", 50))
 	if err := s.Sync(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -205,6 +170,26 @@ func TestDeltaSyncAppliesPatch(t *testing.T) {
 	}
 }
 
+// A node several versions behind takes the one patch of the live version, then a node one behind takes it too.
+func TestDeltaSyncSkipsVersions(t *testing.T) {
+	base := chainBase(t, 500)
+	d := newDeltaServer(t, base)
+	slow := syncer(t, d)
+	d.publish(chainVariant(t, base, "b", 30))
+	fast := syncer(t, d) // joins at version 2 (full download)
+	d.publish(chainVariant(t, base, "c", 40))
+	d.publish(chainVariant(t, base, "d", 50))
+	for name, s := range map[string]*Synchronizer{"slow (3 behind)": slow, "fast (2 behind)": fast} {
+		if err := s.Sync(context.Background()); err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		wantValue(t, s, "key_9", "d_9")
+		if a, fb, _ := s.DeltaStats(); a != 1 || fb != 0 {
+			t.Fatalf("%s: applied=%d fallbacks=%d", name, a, fb)
+		}
+	}
+}
+
 func TestDeltaFallsBackToFullBlob(t *testing.T) {
 	cases := map[string]func(d *deltaServer){
 		"flipped byte": func(d *deltaServer) {
@@ -220,13 +205,18 @@ func TestDeltaFallsBackToFullBlob(t *testing.T) {
 		"garbage": func(d *deltaServer) {
 			d.mutate = func(w http.ResponseWriter, b []byte) []byte { return bytes.Repeat([]byte{7}, len(b)) }
 		},
-		"patch for another base": func(d *deltaServer) { d.fromTag = `"1"`; d.patchFor(buildBlob(t, "z", 500), d.blobNow()) },
+		"patch for another chain": func(d *deltaServer) {
+			other := buildMode(t, 520, CompileOptions{})
+			p := makeTailPatch(other, chainVariant(t, other, "z", 10))
+			d.patch.Store(&p)
+		},
 	}
 	for name, setup := range cases {
 		t.Run(name, func(t *testing.T) {
-			d := newDeltaServer(t, buildBlob(t, "a", 500))
+			base := chainBase(t, 500)
+			d := newDeltaServer(t, base)
 			s := syncer(t, d)
-			d.publish(buildBlob(t, "b", 500))
+			d.publish(chainVariant(t, base, "b", 50))
 			setup(d)
 			if err := s.Sync(context.Background()); err != nil {
 				t.Fatalf("sync must succeed through the fallback: %v", err)
@@ -245,19 +235,13 @@ func TestDeltaFallsBackToFullBlob(t *testing.T) {
 	}
 }
 
-func (d *deltaServer) blobNow() []byte { d.mu.Lock(); defer d.mu.Unlock(); return d.blob }
-func (d *deltaServer) patchFor(old, nw []byte) {
-	p := makePatch(old, nw)
-	d.patch.Store(&p)
-}
-
 func TestDeltaTargetShaHeaderMismatchFallsBack(t *testing.T) {
-	d := newDeltaServer(t, buildBlob(t, "a", 400))
+	base := chainBase(t, 400)
+	d := newDeltaServer(t, base)
 	s := syncer(t, d)
-	d.publish(buildBlob(t, "b", 400))
-	// A patch that rebuilds a different (valid) blob than the server says it serves.
-	other := buildBlob(t, "x", 400)
-	p := makePatch(d.fakeServer.blobFor(`"1"`, d), other)
+	d.publish(chainVariant(t, base, "b", 30))
+	// A patch that rebuilds a different (valid) file than the server says it serves.
+	p := makeTailPatch(base, chainVariant(t, base, "x", 30))
 	d.patch.Store(&p)
 	if err := s.Sync(context.Background()); err != nil {
 		t.Fatal(err)
@@ -268,21 +252,17 @@ func TestDeltaTargetShaHeaderMismatchFallsBack(t *testing.T) {
 	}
 }
 
-func (f *fakeServer) blobFor(_ string, d *deltaServer) []byte {
-	// The base blob is what the node holds: rebuild it the way the test did.
-	return buildBlob(f.t, "a", 400)
-}
-
 func TestWithDeltaOffNeverAsks(t *testing.T) {
-	d := newDeltaServer(t, buildBlob(t, "a", 200))
+	base := chainBase(t, 200)
+	d := newDeltaServer(t, base)
 	s := syncer(t, d, WithDelta(false))
-	d.publish(buildBlob(t, "b", 200))
+	d.publish(chainVariant(t, base, "b", 20))
 	if err := s.Sync(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	wantValue(t, s, "key_1", "b_1")
 	if d.sawAcc.Load() != 0 || d.deltaRq.Load() != 0 {
-		t.Fatal("delta header sent although disabled")
+		t.Fatal("patch capability sent although disabled")
 	}
 }
 
@@ -290,7 +270,8 @@ func TestWithDeltaOffNeverAsks(t *testing.T) {
 // value (never an error, never a torn value), and the swap must complete.
 func TestDeltaHotSwapUnderConcurrentReads(t *testing.T) {
 	const n = 2000
-	d := newDeltaServer(t, buildBlob(t, "a", n))
+	base := chainBase(t, n)
+	d := newDeltaServer(t, base)
 	s := syncer(t, d)
 	stop := make(chan struct{})
 	var wg sync.WaitGroup
@@ -312,8 +293,8 @@ func TestDeltaHotSwapUnderConcurrentReads(t *testing.T) {
 				switch {
 				case err != nil:
 					bad.Add(1)
-				case string(v) == fmt.Sprintf("a_%d", k):
-				case string(v) == fmt.Sprintf("b_%d", k):
+				case string(v) == fmt.Sprintf("val_%d", k):
+				case k < 100 && string(v) == fmt.Sprintf("b_%d", k):
 					sawNew.Store(true)
 				default:
 					bad.Add(1)
@@ -322,7 +303,7 @@ func TestDeltaHotSwapUnderConcurrentReads(t *testing.T) {
 		}(g)
 	}
 	time.Sleep(20 * time.Millisecond)
-	d.publish(buildBlob(t, "b", n))
+	d.publish(chainVariant(t, base, "b", 100))
 	if err := s.Sync(context.Background()); err != nil {
 		t.Fatal(err)
 	}

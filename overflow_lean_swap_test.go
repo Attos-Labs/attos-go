@@ -63,7 +63,7 @@ func TestLeanOverflowGrowsUnderConcurrentReads(t *testing.T) {
 		if nw[8] != 0x06 {
 			t.Fatalf("gen %d: flags %#x", gen, nw[8])
 		}
-		d.publishWith(nw, makeTailPatch)
+		d.publish(nw)
 		if err := s.Sync(context.Background()); err != nil {
 			t.Fatal(err)
 		}
@@ -71,6 +71,7 @@ func TestLeanOverflowGrowsUnderConcurrentReads(t *testing.T) {
 	}
 	// compaction: a new lean main without overflow, sent as a full blob (no patch relates it to the old chain)
 	next := buildMode(t, n+50, CompileOptions{FingerprintBytes: 8})
+	d.patch.Store(nil)
 	d.set(next, `"compacted"`)
 	if err := s.Sync(context.Background()); err != nil {
 		t.Fatal(err)
