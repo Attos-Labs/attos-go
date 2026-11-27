@@ -31,7 +31,7 @@
 
 ## v1.3.0 (2026-10-22)
 
-* PTHash v2 format with a minimal perfect hash and optional LZ4 block compression.
+* v2 format with a compact key index and optional LZ4 block compression.
 * Adaptive offset width: 40-bit offsets lift the 4 GiB blob limit.
 * Spilling `Builder` for low-memory builds.
 * Lower serving RSS: no default warm-up, `MADV_RANDOM`, pages released after the CRC pass. `OpenConfig.Warm` modes (none, index, full).
